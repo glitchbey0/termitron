@@ -67,6 +67,8 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+const BASE_PATH = location.pathname.replace(/\/(index\.html)?$/, '').replace(/\/$/, '');
+const apiUrl = (p) => `${BASE_PATH}${p.startsWith('/') ? p : '/' + p}`;
 
 function b64ToBytes(b64) {
   const bin = atob(b64);
@@ -113,7 +115,7 @@ async function boot() {
   }
   state.token = sessionStorage.getItem('trm_web_token') || '';
 
-  const st = await fetch('/api/auth/status').then((r) => r.json()).catch(() => ({ auth_required: true }));
+  const st = await fetch(apiUrl('/api/auth/status')).then((r) => r.json()).catch(() => ({ auth_required: true }));
   if (!st.auth_required || state.token) connectWs();
   else $('login-screen').classList.remove('hidden');
 }
@@ -122,7 +124,7 @@ $('login-btn').onclick = submitLogin;
 $('login-token').onkeydown = (e) => { if (e.key === 'Enter') submitLogin(); };
 $('register-btn').onclick = async () => {
   $('login-err').textContent = '';
-  const res = await fetch('/api/register', { method: 'POST' })
+  const res = await fetch(apiUrl('/api/register'), { method: 'POST' })
     .then((r) => r.json())
     .catch(() => ({ ok: false, error: t('login_err_net') }));
   if (!res.ok) {
@@ -148,7 +150,7 @@ $('register-btn').onclick = async () => {
 async function submitLogin() {
   const token = $('login-token').value.trim();
   $('login-err').textContent = '';
-  const res = await fetch('/api/auth', {
+  const res = await fetch(apiUrl('/api/auth'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token }),
@@ -166,7 +168,7 @@ async function submitLogin() {
 
 function connectWs() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = `${proto}//${location.host}/ws${state.token ? '?token=' + encodeURIComponent(state.token) : ''}`;
+  const url = `${proto}//${location.host}${apiUrl('/ws')}${state.token ? '?token=' + encodeURIComponent(state.token) : ''}`;
   const ws = new WebSocket(url);
   state.ws = ws;
   let opened = false;
@@ -359,7 +361,7 @@ function handleServerMsg(msg) {
     }
     case 'download_ready': {
       const a = document.createElement('a');
-      a.href = `${msg.url}?token=${encodeURIComponent(state.token)}`;
+      a.href = `${apiUrl(msg.url)}?token=${encodeURIComponent(state.token)}`;
       a.download = msg.name;
       a.click();
       break;
@@ -768,9 +770,9 @@ function renderSidebar() {
                   <span class="muted" style="font-size:10.5px;">${l.connected ? 'Connected' : (l.calls ? `${l.calls} calls` : 'Idle')}</span>
                 </div>
                 ${l.lastIp ? `<div class="muted mono" style="font-size:10.5px;margin-bottom:4px;">IP: ${esc(l.lastIp)}</div>` : ''}
-                <input class="mono" readonly value="${esc(location.origin + '/mcp/' + l.token)}" style="font-size:11px;margin-bottom:6px;" />
+                <input class="mono" readonly value="${esc(location.origin + apiUrl('/mcp/' + l.token))}" style="font-size:11px;margin-bottom:6px;" />
                 <div style="display:flex;gap:4px;">
-                  <button class="btn sm mcp-copy" data-url="${esc(location.origin + '/mcp/' + l.token)}" style="flex:1;justify-content:center;">${t('reg_copy')}</button>
+                  <button class="btn sm mcp-copy" data-url="${esc(location.origin + apiUrl('/mcp/' + l.token))}" style="flex:1;justify-content:center;">${t('reg_copy')}</button>
                   <button class="btn sm mcp-disc" data-id="${esc(l.id)}" title="Disconnect">Disconnect</button>
                   <button class="btn danger sm mcp-del" data-id="${esc(l.id)}" title="${t('tt_delete')}">${t('tt_delete')}</button>
                 </div>
@@ -928,7 +930,7 @@ function getMediaKind(filePath) {
 }
 
 function mediaUrl(sid, filePath) {
-  return `/api/media?token=${encodeURIComponent(state.token)}&clientId=${encodeURIComponent(state.clientId)}&sid=${encodeURIComponent(sid)}&path=${encodeURIComponent(filePath)}`;
+  return `${apiUrl('/api/media')}?token=${encodeURIComponent(state.token)}&clientId=${encodeURIComponent(state.clientId)}&sid=${encodeURIComponent(sid)}&path=${encodeURIComponent(filePath)}`;
 }
 
 function openMediaTab(sid, filePath, mediaKind) {
@@ -1153,9 +1155,9 @@ async function mountVncTab(tab) {
     statusEl.textContent = t('vnc_connecting');
     statusEl.className = 'vnc-status';
     try {
-      const { default: RFB } = await import('/novnc/core/rfb.js');
+      const { default: RFB } = await import(apiUrl('/novnc/core/rfb.js'));
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${proto}//${location.host}/ws-vnc?token=${encodeURIComponent(state.token)}&clientId=${encodeURIComponent(state.clientId)}&sid=${encodeURIComponent(tab.sid)}&host=${encodeURIComponent(tab.host)}&port=${tab.port}`;
+      const url = `${proto}//${location.host}${apiUrl('/ws-vnc')}?token=${encodeURIComponent(state.token)}&clientId=${encodeURIComponent(state.clientId)}&sid=${encodeURIComponent(tab.sid)}&host=${encodeURIComponent(tab.host)}&port=${tab.port}`;
       const rfb = new RFB(stage, url, tab.password ? { credentials: { password: tab.password } } : {});
       rfb.scaleViewport = scale;
       rfb.resizeSession = false;

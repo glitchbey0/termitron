@@ -1,7 +1,85 @@
 const net = require('net');
+const dns = require('dns');
+const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const { spawn, execFileSync } = require('child_process');
+
+function isForbiddenIp(ipStr) {
+  if (['1', 'true'].includes((process.env.TERM_ALLOW_PRIVATE_NET || '').toLowerCase())) return false;
+  const raw = String(ipStr || '').trim().toLowerCase();
+  if (!raw) return true;
+  const v4Mapped = raw.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+  const ip = v4Mapped ? v4Mapped[1] : raw;
+  const ver = net.isIP(ip);
+  if (!ver) return true;
+  const localIps = new Set();
+  const nets = os.networkInterfaces() || {};
+  for (const list of Object.values(nets)) {
+    for (const ni of list || []) {
+      if (ni && ni.address) localIps.add(ni.address.toLowerCase());
+    }
+  }
+  if (localIps.has(ip)) return true;
+  if (ver === 4) {
+    const p = ip.split('.').map(Number);
+    if (p.length !== 4 || p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+    if (p[0] === 0 || p[0] === 10 || p[0] === 127) return true;
+    if (p[0] === 169 && p[1] === 254) return true;
+    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
+    if (p[0] === 192 && p[1] === 168) return true;
+    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true;
+    if (p[0] >= 224) return true;
+    return false;
+  }
+  if (ip === '::1' || ip === '::' || ip.startsWith('fe8') || ip.startsWith('fe9') || ip.startsWith('fea') || ip.startsWith('feb') || ip.startsWith('fc') || ip.startsWith('fd') || ip.startsWith('ff')) {
+    return true;
+  }
+  if (ip.startsWith('::ffff:')) return true;
+  return false;
+}
+
+async function resolveAndValidateTarget(host, port) {
+  const cleanHost = String(host || '').trim();
+  const portNum = Number(port);
+  if (!cleanHost || cleanHost.length > 253 || /[\s\x00-\x1f]/.test(cleanHost)) {
+    throw new Error('Invalid target host.');
+  }
+  if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+    throw new Error('Invalid target port.');
+  }
+  const lower = cleanHost.toLowerCase();
+  if (lower === 'localhost' || lower.endsWith('.localhost') || lower.endsWith('.local') || lower.endsWith('.internal')) {
+    if (!['1', 'true'].includes((process.env.TERM_ALLOW_PRIVATE_NET || '').toLowerCase())) {
+      throw new Error('Access to local/internal hostnames is restricted.');
+    }
+  }
+  const stripped = cleanHost.replace(/^\[|\]$/g, '');
+  if (net.isIP(stripped)) {
+    if (isForbiddenIp(stripped)) {
+      throw new Error('Access to private, loopback, or internal IP addresses is restricted.');
+    }
+    return stripped;
+  }
+  if (/^(0x[0-9a-f]+|\d+)$/i.test(stripped)) {
+    throw new Error('Numeric IP encoding is not allowed.');
+  }
+  let records;
+  try {
+    records = await dns.promises.lookup(stripped, { all: true, verbatim: true });
+  } catch {
+    throw new Error(`Could not resolve host: ${cleanHost}`);
+  }
+  if (!records || !records.length) {
+    throw new Error(`Could not resolve host: ${cleanHost}`);
+  }
+  for (const r of records) {
+    if (isForbiddenIp(r.address)) {
+      throw new Error('Target host resolves to a restricted internal or loopback IP address.');
+    }
+  }
+  return records[0].address;
+}
 
 const activeTunnels = new Map();
 const pendingStarts = new Map();
@@ -153,6 +231,9 @@ async function ensureWireproxy(key, dataDir, wgConf) {
     const bin = findWireproxyBin();
     if (!bin) {
       throw new Error('wireproxy binary not found. Install wireproxy in PATH or ./bin/wireproxy.');
+    }
+    if (process.platform !== 'win32') {
+      try { fs.chmodSync(bin, 0o755); } catch {}
     }
 
     const port = await allocLocalPort();
@@ -337,16 +418,21 @@ function connectSocks5(proxyHost, proxyPort, targetHost, targetPort, username = 
 }
 
 async function connectThroughVpn(userId, uStore, baseDataDir, vpnCfg, targetHost, targetPort, policy = { vpnEnabled: true, allowWithoutVpn: false }) {
+  const safeTargetIp = await resolveAndValidateTarget(targetHost, targetPort);
   const mode = vpnCfg?.mode === 'socks5' ? 'socks5' : 'default';
+  let safeProxyIp = null;
+  if (mode === 'socks5') {
+    safeProxyIp = await resolveAndValidateTarget(vpnCfg.socksHost || '127.0.0.1', Number(vpnCfg.socksPort) || 1080);
+  }
   if (!policy?.vpnEnabled) {
     if (!policy?.allowWithoutVpn) {
       throw new Error('VPN is disabled by administrator. Connections are blocked.');
     }
     if (mode === 'socks5') {
       return connectSocks5(
-        vpnCfg.socksHost || '127.0.0.1',
+        safeProxyIp,
         Number(vpnCfg.socksPort) || 1080,
-        targetHost,
+        safeTargetIp,
         targetPort,
         vpnCfg.socksUser || '',
         vpnCfg.socksPass || ''
@@ -359,18 +445,18 @@ async function connectThroughVpn(userId, uStore, baseDataDir, vpnCfg, targetHost
     const hop1 = await connectSocks5(
       defTun.host,
       defTun.port,
-      vpnCfg.socksHost || '127.0.0.1',
+      safeProxyIp,
       Number(vpnCfg.socksPort) || 1080
     );
     return socks5HandshakeOverStream(
       hop1,
-      targetHost,
+      safeTargetIp,
       targetPort,
       vpnCfg.socksUser || '',
       vpnCfg.socksPass || ''
     );
   }
-  return connectSocks5(defTun.host, defTun.port, targetHost, targetPort);
+  return connectSocks5(defTun.host, defTun.port, safeTargetIp, targetPort);
 }
 
 function getUserStatus() {
@@ -480,5 +566,7 @@ module.exports = {
   deleteDefaultConf,
   getAdminStatus,
   testDefaultExitIp,
+  resolveAndValidateTarget,
+  isForbiddenIp,
   stopAll,
 };

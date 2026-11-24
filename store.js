@@ -155,10 +155,10 @@ function legacyHashKey(key) {
 }
 
 function safeStrEqual(a, b) {
-  const ba = Buffer.from(String(a), 'utf8');
-  const bb = Buffer.from(String(b), 'utf8');
-  if (ba.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ba, bb);
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ha = crypto.createHmac('sha256', getMasterKey()).update(a).digest();
+  const hb = crypto.createHmac('sha256', getMasterKey()).update(b).digest();
+  return crypto.timingSafeEqual(ha, hb) && a.length === b.length;
 }
 
 function registerUser() {
@@ -245,21 +245,37 @@ function deleteUser(userId) {
   const shares = loadJson('shares.json', []);
   const nextShares = shares.filter((s) => s.ownerId !== userId && s.targetId !== userId);
   if (nextShares.length !== shares.length) saveJson('shares.json', nextShares, 0o600);
+  const mcpMap = loadJson('mcp_tokens.json', {});
+  let mcpChanged = false;
+  for (const [tok, rec] of Object.entries(mcpMap)) {
+    if (rec && rec.userId === userId) {
+      delete mcpMap[tok];
+      mcpChanged = true;
+    }
+  }
+  if (mcpChanged) saveJson('mcp_tokens.json', mcpMap, 0o600);
   return changed;
 }
 
-function userExists(userId) {
+function isValidUserId(userId) {
   if (!userId || typeof userId !== 'string') return false;
+  if (userId === 'default') return true;
+  return /^[a-f0-9]{16}$/.test(userId);
+}
+
+function userExists(userId) {
+  if (!isValidUserId(userId)) return false;
   if (userId === 'default') return true;
   const users = loadJson('users.json', {});
   return Object.values(users).some((rec) => rec.userId === userId && !rec.disabled);
 }
 
 function forUser(userId) {
-  const raw = userId && userId !== 'default' ? String(userId).replace(/[^a-zA-Z0-9_-]/g, '') : '';
-  const safeId = raw && raw !== '.' && raw !== '..' ? raw : '';
-  const dir = safeId ? path.resolve(DATA_DIR, 'users', safeId) : DATA_DIR;
-  if (safeId && !dir.startsWith(path.resolve(DATA_DIR, 'users') + path.sep)) {
+  if (!isValidUserId(userId)) {
+    throw new Error('Invalid user identifier');
+  }
+  const dir = userId === 'default' ? DATA_DIR : path.resolve(DATA_DIR, 'users', userId);
+  if (userId !== 'default' && !dir.startsWith(path.resolve(DATA_DIR, 'users') + path.sep)) {
     throw new Error('Invalid user directory');
   }
   return {

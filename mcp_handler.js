@@ -206,9 +206,7 @@ async function openMcpSsh(userId, uStore, profile, depth = 0) {
   if (depth > 3) throw new Error('Jump host chain too deep.');
   const hostStr = String(profile.host || '').trim();
   const portNum = Number(profile.port) || 22;
-  if (!hostStr || hostStr.length > 253 || /[\s\x00-\x1f]/.test(hostStr)) {
-    throw new Error('Invalid server host.');
-  }
+  const safeTargetIp = await vpnMgr.resolveAndValidateTarget(hostStr, portNum);
   const secrets = uStore.loadSecrets();
   const pid = profile.id || '';
   const password = (pid && secrets[pid]?.password) || '';
@@ -222,7 +220,7 @@ async function openMcpSsh(userId, uStore, profile, depth = 0) {
     if (!jh) throw new Error('Jump host not found.');
     const jConn = await openMcpSsh(userId, uStore, jh, depth + 1);
     sockStream = await new Promise((res, rej) => {
-      jConn.forwardOut('127.0.0.1', 0, hostStr, portNum, (e, s) => {
+      jConn.forwardOut('127.0.0.1', 0, safeTargetIp, portNum, (e, s) => {
         if (e) { try { jConn.end(); } catch {} return rej(e); }
         s.on('close', () => { try { jConn.end(); } catch {} });
         res(s);
@@ -238,7 +236,7 @@ async function openMcpSsh(userId, uStore, profile, depth = 0) {
           socksPass: proxyPass,
         }
       : { mode: 'default' };
-    sockStream = await vpnMgr.connectThroughVpn(userId, uStore, store.DATA_DIR, vpnCfg, hostStr, portNum, store.getGlobalPolicy());
+    sockStream = await vpnMgr.connectThroughVpn(userId, uStore, store.DATA_DIR, vpnCfg, safeTargetIp, portNum, store.getGlobalPolicy());
   }
 
   const conn = new SshClient();
@@ -249,7 +247,7 @@ async function openMcpSsh(userId, uStore, profile, depth = 0) {
     conn.on('error', (e) => { clearTimeout(timer); reject(e); });
     conn.on('keyboard-interactive', (n, i, l, prompts, finish) => finish(prompts.map(() => password)));
     const cfg = {
-      host: hostStr,
+      host: safeTargetIp,
       port: portNum,
       username: profile.user || 'root',
       tryKeyboard: true,
@@ -272,6 +270,10 @@ async function openMcpSsh(userId, uStore, profile, depth = 0) {
       cfg.privateKey = privateKey;
       if (passphrase) cfg.passphrase = passphrase;
     } else if (profile.auth === 'agent') {
+      if (userId !== 'default' || !['1', 'true'].includes((process.env.TERM_ALLOW_SSH_AGENT || '').toLowerCase())) {
+        clearTimeout(timer);
+        return reject(new Error('SSH agent authentication is disabled on this server.'));
+      }
       cfg.agent = process.env.SSH_AUTH_SOCK;
     } else {
       cfg.password = password;
@@ -556,7 +558,6 @@ async function callTool(userId, name, args = {}, getActiveSessions = null, onSha
         if (!found.shared.permissions?.edit_host) {
           throw new Error('Permission denied: edit_host');
         }
-        const canEditEnv = !!found.shared.permissions?.sudo;
         const ownerStore = store.forUser(found.shared.ownerId);
         const ownerHosts = ownerStore.loadHosts();
         const nextHosts = ownerHosts.map((h) => {
@@ -566,7 +567,6 @@ async function callTool(userId, name, args = {}, getActiveSessions = null, onSha
               ...(args.name !== undefined ? { name: String(args.name).trim() || h.name } : {}),
               ...(args.group !== undefined ? { group: String(args.group).trim() } : {}),
               ...(args.note !== undefined ? { note: String(args.note) } : {}),
-              ...(canEditEnv && args.env !== undefined ? { env: String(args.env) } : {}),
             };
           }
           return h;

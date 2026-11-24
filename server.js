@@ -39,10 +39,13 @@ const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const ADMIN_TTL_MS = 12 * 60 * 60 * 1000;
 const sessionTokens = new Map();
 function safeEqual(a, b) {
-  const ba = Buffer.from(String(a), 'utf8');
-  const bb = Buffer.from(String(b), 'utf8');
-  if (ba.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ba, bb);
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ha = crypto.createHash('sha256').update(a).digest();
+  const hb = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(ha, hb) && a.length === b.length;
+}
+function isSafeId(id) {
+  return typeof id === 'string' && /^[a-zA-Z0-9_:-]{1,64}$/.test(id) && id !== '__proto__' && id !== 'constructor' && id !== 'prototype';
 }
 function issueSessionToken(userId) {
   if (sessionTokens.size >= 10000) {
@@ -59,7 +62,7 @@ function authenticateToken(tok) {
   if (safeEqual(tok, SECRET)) return { ok: true, userId: 'default' };
   const sRec = sessionTokens.get(tok);
   if (sRec) {
-    if (Date.now() > sRec.exp) {
+    if (Date.now() > sRec.exp || !store.userExists(sRec.userId)) {
       sessionTokens.delete(tok);
       return null;
     }
@@ -67,9 +70,9 @@ function authenticateToken(tok) {
     return { ok: true, userId: sRec.userId };
   }
   const kUid = store.findUserByKey(tok);
-  if (kUid) return { ok: true, userId: kUid };
+  if (kUid && store.userExists(kUid)) return { ok: true, userId: kUid };
   const mUid = store.findUserByMcpToken(tok);
-  if (mUid) return { ok: true, userId: mUid };
+  if (mUid && store.userExists(mUid)) return { ok: true, userId: mUid };
   return null;
 }
 
@@ -141,7 +144,22 @@ app.use((req, res, next) => {
   );
   next();
 });
+const BASE_PATH = (process.env.TERM_BASE_PATH || process.env.PASSENGER_BASE_URI || '').replace(/\/+$/, '');
+function stripBasePath(u) {
+  if (!u) return '/';
+  if (BASE_PATH && (u === BASE_PATH || u.startsWith(BASE_PATH + '/') || u.startsWith(BASE_PATH + '?'))) {
+    return u.slice(BASE_PATH.length) || '/';
+  }
+  const m = u.match(/^\/[^/?#]+(\/(?:api|ws|ws-vnc|admin|download|mcp|novnc)(?:[/?#].*)?|\/[^/?#]+\.(?:js|css|html|svg|png|ico)(?:\?.*)?)$/);
+  if (m) return m[1];
+  return u;
+}
+
 app.use(express.json({ limit: '1mb' }));
+app.use((req, res, next) => {
+  req.url = stripBasePath(req.url);
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/novnc', express.static(path.join(__dirname, 'node_modules', '@novnc', 'novnc')));
 
@@ -387,13 +405,18 @@ app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
+app.get(/^\/[^/]+\/?$/, (req, res, next) => {
+  if (req.path === '/api' || req.path === '/mcp' || req.path === '/admin' || req.path.includes('.')) return next();
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 app.post('/api/admin/login', (req, res) => {
   const ip = req.ip || req.socket?.remoteAddress || 'unknown';
   if (!checkAuthRate(ip)) {
     return res.status(429).json({ ok: false, error: 'Too many failed attempts. Try again in 1 minute.' });
   }
   const key = String(req.body?.key || '').trim();
-  if (key && (safeEqual(key, ADMIN_KEY) || safeEqual(key, SECRET))) {
+  if (key && safeEqual(key, ADMIN_KEY)) {
     authFailures.delete(ip);
     if (adminTokens.size >= 500) {
       const first = adminTokens.keys().next().value;
@@ -522,26 +545,24 @@ app.post('/api/admin/users/create', requireAdmin, (req, res) => {
   res.json({ ok: true, userId, accessKey });
 });
 
-app.post('/api/admin/users/toggle', requireAdmin, (req, res) => {
-  const uid = String(req.body?.userId || '');
-  const disabled = !!req.body?.disabled;
-  store.setUserDisabled(uid, disabled);
-  if (disabled) {
-    for (const [tok, rec] of sessionTokens.entries()) if (rec.userId === uid) sessionTokens.delete(tok);
-    for (const [key, sess] of activeClientSessions.entries()) {
-      if (sess.userId === uid) {
-        try { sess.primeStream?.close(); } catch {}
-        try { sess.conn?.end(); } catch {}
-        activeClientSessions.delete(key);
-      }
+function evictUserEverywhere(uid) {
+  if (!uid || uid === 'default') return;
+  for (const [tok, rec] of sessionTokens.entries()) {
+    if (rec.userId === uid) sessionTokens.delete(tok);
+  }
+  for (const [sid, s] of mcpSseSessions.entries()) {
+    if (s.userId === uid) {
+      clearInterval(s.hb);
+      try { s.res.end(); } catch {}
+      mcpSseSessions.delete(sid);
     }
   }
-  res.json({ ok: true });
-});
-
-app.post('/api/admin/users/delete', requireAdmin, (req, res) => {
-  const uid = String(req.body?.userId || '');
-  for (const [tok, rec] of sessionTokens.entries()) if (rec.userId === uid) sessionTokens.delete(tok);
+  for (const [cid, c] of mcpActiveCalls.entries()) {
+    if (c.userId === uid) {
+      c.aborted = true;
+      mcpActiveCalls.delete(cid);
+    }
+  }
   for (const [key, sess] of activeClientSessions.entries()) {
     if (sess.userId === uid) {
       try { sess.primeStream?.close(); } catch {}
@@ -549,6 +570,40 @@ app.post('/api/admin/users/delete', requireAdmin, (req, res) => {
       activeClientSessions.delete(key);
     }
   }
+  for (const [cid, cw] of clientWorkspaces.entries()) {
+    if (cw.userId === uid) {
+      if (cw.cleanupTimer) clearTimeout(cw.cleanupTimer);
+      for (const t of cw.terms.values()) try { t.close(); } catch {}
+      for (const s of cw.sessions.values()) {
+        try { s.primeStream?.close(); } catch {}
+        try { s.conn?.end(); } catch {}
+      }
+      clientWorkspaces.delete(cid);
+    }
+  }
+  for (const client of wss.clients) {
+    if (client._userId === uid) {
+      try { client.close(1008, 'Account disabled'); } catch {}
+    }
+  }
+  for (const client of vncWss.clients) {
+    if (client._userId === uid) {
+      try { client.close(1008, 'Account disabled'); } catch {}
+    }
+  }
+}
+
+app.post('/api/admin/users/toggle', requireAdmin, (req, res) => {
+  const uid = String(req.body?.userId || '');
+  const disabled = !!req.body?.disabled;
+  store.setUserDisabled(uid, disabled);
+  if (disabled) evictUserEverywhere(uid);
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/users/delete', requireAdmin, (req, res) => {
+  const uid = String(req.body?.userId || '');
+  evictUserEverywhere(uid);
   store.deleteUser(uid);
   res.json({ ok: true });
 });
@@ -807,7 +862,8 @@ server.on('upgrade', (req, socket, head) => {
       return socket.destroy();
     }
   }
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const rawUrl = stripBasePath(req.url || '/');
+  const url = new URL(rawUrl, `http://${req.headers.host || 'localhost'}`);
   const auth = authenticateToken(url.searchParams.get('token'));
   if (!auth) {
     recordAuthFailure(ip);
@@ -824,6 +880,7 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 vncWss.on('connection', (ws, url, userId) => {
+  ws._userId = userId;
   ws._socket?.setNoDelay?.(true);
   const clientId = url.searchParams.get('clientId') || '';
   const sid = url.searchParams.get('sid') || '';
@@ -899,6 +956,7 @@ vncWss.on('connection', (ws, url, userId) => {
 });
 
 wss.on('connection', (ws, req, userId = 'default') => {
+  ws._userId = userId;
   const uStore = store.forUser(userId);
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
@@ -981,55 +1039,62 @@ wss.on('connection', (ws, req, userId = 'default') => {
     return { env, keepalive, compress };
   }
 
-  async function connectSsh(profile, depth = 0, targetUid = userId, targetStore = uStore) {
+  async function connectSsh(profile, depth = 0, targetUid = userId, targetStore = uStore, sharedMeta = null) {
     if (depth > 3) throw new Error('Jump host chain too deep.');
-    const hostStr = String(profile?.host || '').trim();
-    const portNum = Number(profile?.port) || 22;
-    if (!hostStr || hostStr.length > 253 || /[\s\x00-\x1f]/.test(hostStr)) {
-      throw new Error('Invalid server host.');
-    }
-    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
-      throw new Error('Invalid server port.');
-    }
-    const secrets = targetStore.loadSecrets();
-    const pid = profile.id || '';
+    const savedHosts = targetStore.loadHosts();
+    const pid = isSafeId(profile?.id) ? profile.id : '';
+    const savedHost = pid ? savedHosts.find((h) => h.id === pid) : null;
+    const matchesSaved = !!(
+      savedHost &&
+      String(profile?.host || '').trim() === String(savedHost.host || '').trim() &&
+      (Number(profile?.port) || 22) === (Number(savedHost.port) || 22) &&
+      (profile?.user || 'root') === (savedHost.user || 'root')
+    );
+    const effectiveProfile = matchesSaved ? { ...savedHost, ...profile, host: savedHost.host, port: savedHost.port, user: savedHost.user } : profile;
+    const hostStr = String(effectiveProfile?.host || '').trim();
+    const portNum = Number(effectiveProfile?.port) || 22;
+    const safeTargetIp = await vpnMgr.resolveAndValidateTarget(hostStr, portNum);
+    const secrets = matchesSaved ? targetStore.loadSecrets() : {};
     const conn = new SshClient();
-    const { keepalive, compress } = parseHostOptions(profile);
+    const { keepalive, compress } = parseHostOptions(effectiveProfile);
+    const hideAddr = !!(sharedMeta && !sharedMeta.permissions?.show_address);
+    const displayTarget = hideAddr ? (effectiveProfile.name || 'Shared Server') : `${effectiveProfile.user || 'root'}@${hostStr}`;
 
-    let password = pid && secrets[pid]?.password ? secrets[pid].password : profile.password || '';
-    if ((profile.auth || 'password') === 'password' && !password) {
-      const ans = await askSecret('SSH Şifresi', `${profile.user}@${hostStr}`, !!pid && targetUid === userId);
+    let password = pid && secrets[pid]?.password ? secrets[pid].password : (targetUid === userId ? effectiveProfile.password || '' : '');
+    if ((effectiveProfile.auth || 'password') === 'password' && !password) {
+      const ans = await askSecret('SSH Şifresi', displayTarget, !!pid && matchesSaved && targetUid === userId);
       if (!ans) throw new Error('Bağlantı iptal edildi.');
       password = ans.value;
-      if (ans.save && pid && targetUid === userId) {
-        secrets[pid] = { ...(secrets[pid] || {}), password };
-        targetStore.saveSecrets(secrets);
+      if (ans.save && pid && matchesSaved && targetUid === userId) {
+        const allSec = targetStore.loadSecrets();
+        allSec[pid] = { ...(allSec[pid] || {}), password };
+        targetStore.saveSecrets(allSec);
       }
     }
 
     let privateKey;
-    let passphrase = pid && secrets[pid]?.passphrase ? secrets[pid].passphrase : profile.passphrase || '';
-    if (profile.auth === 'key' && pid && secrets[pid]?.privateKey) {
+    let passphrase = pid && secrets[pid]?.passphrase ? secrets[pid].passphrase : (targetUid === userId ? effectiveProfile.passphrase || '' : '');
+    if (effectiveProfile.auth === 'key' && pid && secrets[pid]?.privateKey) {
       privateKey = secrets[pid].privateKey;
     }
 
     let sockStream;
-    if (profile.jump_id) {
-      const jumpHost = targetStore.loadHosts().find((h) => h.id === profile.jump_id);
+    if (effectiveProfile.jump_id) {
+      const jumpHost = savedHosts.find((h) => h.id === effectiveProfile.jump_id);
       if (jumpHost) {
-        const jConn = await connectSsh(jumpHost, depth + 1, targetUid, targetStore);
+        const jConn = await connectSsh(jumpHost, depth + 1, targetUid, targetStore, sharedMeta);
         sockStream = await new Promise((res, rej) => {
-          jConn.forwardOut('127.0.0.1', 0, hostStr, portNum, (err, s) => (err ? rej(err) : res(s)));
+          jConn.forwardOut('127.0.0.1', 0, safeTargetIp, portNum, (err, s) => (err ? rej(err) : res(s)));
         });
       }
     } else {
-      const proxyPass = (profile.id && secrets[profile.id]?.proxy_pass) || profile.proxy_pass || '';
-      const vpnCfg = profile.proxy_mode === 'socks5' && profile.proxy_host
+      const proxyPass = (pid && secrets[pid]?.proxy_pass) || (targetUid === userId ? effectiveProfile.proxy_pass || '' : '');
+      const vpnCfg = effectiveProfile.proxy_mode === 'socks5' && effectiveProfile.proxy_host
         ? {
             mode: 'socks5',
-            socksHost: String(profile.proxy_host).trim(),
-            socksPort: Number(profile.proxy_port) || 1080,
-            socksUser: profile.proxy_user || '',
+            socksHost: String(effectiveProfile.proxy_host).trim(),
+            socksPort: Number(effectiveProfile.proxy_port) || 1080,
+            socksUser: effectiveProfile.proxy_user || '',
             socksPass: proxyPass,
           }
         : { mode: 'default' };
@@ -1038,7 +1103,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
         targetStore,
         store.DATA_DIR,
         vpnCfg,
-        hostStr,
+        safeTargetIp,
         portNum,
         store.getGlobalPolicy()
       );
@@ -1060,7 +1125,8 @@ wss.on('connection', (ws, req, userId = 'default') => {
       conn._traffic = traffic;
     }
 
-    const khName = Number(profile.port || 22) === 22 ? profile.host : `[${profile.host}]:${profile.port}`;
+    const khName = Number(effectiveProfile.port || 22) === 22 ? hostStr : `[${hostStr}]:${effectiveProfile.port}`;
+    const displayKhName = hideAddr ? (effectiveProfile.name || 'Shared Server') : khName;
     await new Promise((resolve, reject) => {
       conn.on('ready', () => {
         conn._sock?.setNoDelay?.(true);
@@ -1070,32 +1136,35 @@ wss.on('connection', (ws, req, userId = 'default') => {
       conn.on('keyboard-interactive', (n, i, l, prompts, finish) => finish(prompts.map(() => password)));
 
       const cfg = {
-        host: profile.host,
-        port: Number(profile.port) || 22,
-        username: profile.user || 'root',
+        host: safeTargetIp,
+        port: portNum,
+        username: effectiveProfile.user || 'root',
         tryKeyboard: true,
-        keepaliveInterval: (Number(profile.keepalive) || 30) * 1000,
+        keepaliveInterval: (Number(effectiveProfile.keepalive) || 30) * 1000,
         hostVerifier: (keyBuf, cb) => {
           const b64 = keyBuf.toString('base64');
-          const fp = uStore.fingerprintB64(b64);
-          const kh = uStore.loadKnownHosts();
+          const fp = targetStore.fingerprintB64(b64);
+          const kh = targetStore.loadKnownHosts();
           const same = kh.filter((e) => e.host === khName);
           if (same.some((e) => e.key === b64)) return cb(true);
-          askHostKey(same.length === 0 ? 'new' : 'changed', khName, fp, same.map((e) => uStore.fingerprintB64(e.key))).then((allow) => {
-            if (allow) {
+          askHostKey(same.length === 0 ? 'new' : 'changed', displayKhName, fp, same.map((e) => targetStore.fingerprintB64(e.key))).then((allow) => {
+            if (allow && targetUid === userId) {
               const filtered = kh.filter((e) => e.host !== khName);
               filtered.push({ host: khName, ktype: 'ssh-key', key: b64, fp });
-              uStore.saveKnownHosts(filtered);
+              targetStore.saveKnownHosts(filtered);
             }
             cb(allow);
           });
         },
       };
       if (sockStream) cfg.sock = sockStream;
-      if (profile.auth === 'key' && privateKey) {
+      if (effectiveProfile.auth === 'key' && privateKey) {
         cfg.privateKey = privateKey;
         if (passphrase) cfg.passphrase = passphrase;
-      } else if (profile.auth === 'agent') {
+      } else if (effectiveProfile.auth === 'agent') {
+        if (targetUid !== 'default' || !['1', 'true'].includes((process.env.TERM_ALLOW_SSH_AGENT || '').toLowerCase())) {
+          return reject(new Error('SSH agent authentication is disabled on this server.'));
+        }
         cfg.agent = process.env.SSH_AUTH_SOCK;
       } else {
         cfg.password = password;
@@ -1138,6 +1207,10 @@ wss.on('connection', (ws, req, userId = 'default') => {
   }
 
   ws.on('message', async (raw) => {
+    if (!NO_AUTH && !store.userExists(userId)) {
+      try { ws.close(1008, 'Account disabled'); } catch {}
+      return;
+    }
     let msg;
     try { msg = JSON.parse(raw.toString('utf8')); } catch { return; }
 
@@ -1298,33 +1371,20 @@ wss.on('connection', (ws, req, userId = 'default') => {
           }
           const ownerStore = store.forUser(resolved.ownerId);
           const ownerHosts = ownerStore.loadHosts();
-          const { had_pw, had_key, had_passphrase, had_proxy_pass, password, passphrase, proxy_pass, shared, shareId, ownerId, permissions, rawHostId, showAddress, ...cleanHost } = msg.host || {};
-          const isSudoShare = !!resolved.permissions.sudo;
+          const cleanHost = msg.host && typeof msg.host === 'object' ? msg.host : {};
           const nextHosts = ownerHosts.map((h) => {
             if (h.id !== resolved.host.id) return h;
-            if (!isSudoShare) {
-              return {
-                ...h,
-                name: cleanHost.name !== undefined ? String(cleanHost.name).trim() || h.name : h.name,
-                group: cleanHost.group !== undefined ? String(cleanHost.group).trim() : h.group,
-                note: cleanHost.note !== undefined ? String(cleanHost.note) : h.note,
-                color: cleanHost.color || h.color,
-                tags: Array.isArray(cleanHost.tags) ? cleanHost.tags : h.tags,
-                keepalive: Number(cleanHost.keepalive) || h.keepalive || 30,
-              };
-            }
-            return { ...h, ...cleanHost, id: resolved.host.id };
+            return {
+              ...h,
+              name: cleanHost.name !== undefined ? String(cleanHost.name).trim() || h.name : h.name,
+              group: cleanHost.group !== undefined ? String(cleanHost.group).trim() : h.group,
+              note: cleanHost.note !== undefined ? String(cleanHost.note) : h.note,
+              color: cleanHost.color || h.color,
+              tags: Array.isArray(cleanHost.tags) ? cleanHost.tags : h.tags,
+              keepalive: Number(cleanHost.keepalive) || h.keepalive || 30,
+            };
           });
           ownerStore.saveHosts(nextHosts);
-          if (isSudoShare && msg.secrets) {
-            const s = ownerStore.loadSecrets();
-            s[resolved.host.id] = { ...(s[resolved.host.id] || {}) };
-            if (msg.secrets.password) s[resolved.host.id].password = msg.secrets.password;
-            if (msg.secrets.passphrase) s[resolved.host.id].passphrase = msg.secrets.passphrase;
-            if (msg.secrets.proxy_pass) s[resolved.host.id].proxy_pass = msg.secrets.proxy_pass;
-            if (msg.secrets.privateKey) s[resolved.host.id].privateKey = msg.secrets.privateKey;
-            ownerStore.saveSecrets(s);
-          }
           toast('Shared server updated.', 'ok');
           send({ type: 'hosts_update', hosts: buildClientHosts(userId) });
           for (const cw of clientWorkspaces.values()) {
@@ -1367,7 +1427,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
               secDirty = true;
             }
           }
-          if (msg.hostId && msg.secrets) {
+          if (isSafeId(msg.hostId) && msg.secrets) {
             s[msg.hostId] = { ...(s[msg.hostId] || {}) };
             if (msg.secrets.password) { s[msg.hostId].password = msg.secrets.password; secDirty = true; }
             if (msg.secrets.passphrase) { s[msg.hostId].passphrase = msg.secrets.passphrase; secDirty = true; }
@@ -1425,7 +1485,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
             };
           }
           try {
-            const conn = await connectSsh(profile, 0, targetUid, targetStore);
+            const conn = await connectSsh(profile, 0, targetUid, targetStore, sharedMeta);
             const sess = { userId, profile, conn, sftp: null, root: '/', sudo: false, sudoPw: '', sftpPromise: null, primeStream: null, connectedAt: Date.now(), traffic: conn._traffic || { rx: 0, tx: 0 }, shared: sharedMeta };
             sessions.set(sid, sess);
             activeClientSessions.set(`${clientId}:${sid}`, sess);
@@ -1971,13 +2031,20 @@ setInterval(() => {
 }, 25000).unref();
 
 server.listen(BIND_PORT, BIND_HOST, () => {
-  console.log(`Termitron (Node.js) started: http://${BIND_HOST}:${BIND_PORT}`);
-  console.log(`Data directory: ${store.DATA_DIR}`);
-  console.log(`Admin Panel: http://${BIND_HOST}:${BIND_PORT}/admin (Admin Key: ${ADMIN_KEY})`);
+  const lines = [
+    `Termitron (Node.js) started: http://${BIND_HOST}:${BIND_PORT}`,
+    `Data directory: ${store.DATA_DIR}`,
+    `Admin Panel: http://${BIND_HOST}:${BIND_PORT}/admin (Admin Key: ${ADMIN_KEY})`,
+  ];
   if (NO_AUTH) {
-    console.log('WARNING: Authentication is disabled (--no-auth).');
+    lines.push('WARNING: Authentication is disabled (--no-auth).');
   } else {
-    console.log(`Access password / token: ${SECRET}`);
-    console.log(`Quick login URL: http://${BIND_HOST}:${BIND_PORT}/?token=${SECRET}`);
+    lines.push(`Access password / token: ${SECRET}`);
+    lines.push(`Quick login URL: http://${BIND_HOST}:${BIND_PORT}/?token=${SECRET}`);
   }
+  for (const l of lines) console.log(l);
+  try {
+    fs.mkdirSync(store.DATA_DIR, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(store.DATA_DIR, 'startup.log'), lines.join('\n') + '\n', { encoding: 'utf8', mode: 0o600 });
+  } catch {}
 });

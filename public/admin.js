@@ -1,4 +1,6 @@
 const $ = (id) => document.getElementById(id);
+const BASE_PATH = location.pathname.replace(/\/admin(\/index\.html)?\/?$/, '').replace(/\/$/, '');
+const apiUrl = (p) => `${BASE_PATH}${p.startsWith('/') ? p : '/' + p}`;
 const state = {
   token: sessionStorage.getItem('trm_admin_token') || '',
   tab: 'overview',
@@ -41,7 +43,7 @@ async function api(url, method = 'GET', body = null) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const r = await fetch(url, opts);
+  const r = await fetch(apiUrl(url), opts);
   if (r.status === 401) {
     sessionStorage.removeItem('trm_admin_token');
     state.token = '';
@@ -55,7 +57,7 @@ async function api(url, method = 'GET', body = null) {
 async function login() {
   $('adm-login-err').textContent = '';
   const key = $('adm-key-input').value.trim();
-  const res = await fetch('/api/admin/login', {
+  const res = await fetch(apiUrl('/api/admin/login'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ key }),
