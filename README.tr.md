@@ -17,6 +17,26 @@
 
 ## Hızlı Kurulum ve Başlatma
 
+### Docker
+
+```bash
+docker run -d \
+  --name termitron \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -e TERM_BIND=0.0.0.0:8080 \
+  -v termitron_data:/app/data \
+  glitchbey/termitron
+```
+
+Oluşturulan **Erişim Token'ı** ve **Admin Key** bilgilerini konteyner loglarından görüntülemek için:
+
+```bash
+docker logs termitron
+```
+
+### Node.js
+
 ```bash
 cd termitron
 npm install
