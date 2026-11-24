@@ -26,7 +26,13 @@ docker run -d \
   -p 8080:8080 \
   -e TERM_BIND=0.0.0.0:8080 \
   -v termitron_data:/app/data \
-  termitron
+  glitchbey/termitron
+```
+
+View the generated **Access Token** and **Admin Key** in the container logs:
+
+```bash
+docker logs termitron
 ```
 
 ### Node.js
