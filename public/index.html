@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Termitron</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+  <link rel="stylesheet" href="style.css?v=6" />
+</head>
+<body>
+  
+  <div id="login-screen" class="login-overlay hidden">
+    <div class="landing-wrap">
+      <div class="landing-top">
+        <div class="login-brand" style="margin:0;">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#0078d4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          <div>
+            <h1 style="font-size:16px;">Termitron</h1>
+            <p class="muted" data-i18n="login_sub">SSH / SFTP / Terminal / Docker</p>
+          </div>
+        </div>
+        <button id="landing-lang" class="btn sm" style="font-weight:600;">EN</button>
+      </div>
+
+      <div class="landing-grid">
+        <div class="landing-hero">
+          <h2 data-i18n="land_title">Manage all your servers from one workspace.</h2>
+          <p class="muted" data-i18n="land_desc">Fast, browser-based SSH terminal, SFTP file manager, noVNC remote desktop, and Docker control — isolated per personal access key.</p>
+          <ul class="landing-feats">
+            <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#3794ff" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg><span data-i18n="land_f1">Multi-tab SSH terminal &amp; customizable split layout</span></li>
+            <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#dcb67a" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span data-i18n="land_f2">SFTP explorer with root (sudo) &amp; media viewer</span></li>
+            <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg><span data-i18n="land_f3">Built-in noVNC remote desktop over SSH tunnel</span></li>
+            <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#b682f0" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5"/></svg><span data-i18n="land_f4">One-click registration with your personal access key</span></li>
+          </ul>
+        </div>
+
+        <div class="login-card">
+          <h3 style="margin:0 0 10px;color:var(--ink-bright);" data-i18n="login_card_title">Sign In</h3>
+          <label class="field-label" data-i18n="login_label">Access Key or Token</label>
+          <input id="login-token" type="password" data-i18n-placeholder="login_ph" placeholder="trm_... or access token" />
+          <div id="login-err" class="err-text"></div>
+          <button id="login-btn" class="btn primary full" data-i18n="login_btn">Sign In</button>
+
+          <div class="auth-divider"><span data-i18n="auth_or">or</span></div>
+
+          <button id="register-btn" class="btn full" data-i18n="reg_btn">Register &amp; Generate Key</button>
+          <div id="reg-key-box" class="reg-key-box hidden">
+            <div class="muted" style="font-size:11.5px;margin-bottom:6px;" data-i18n="reg_save_note">Save this key! Use it to sign in and manage your servers:</div>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input id="reg-key-val" class="mono" type="text" readonly />
+              <button id="reg-copy-btn" class="btn sm" data-i18n="reg_copy">Copy</button>
+            </div>
+            <button id="reg-enter-btn" class="btn primary full" data-i18n="reg_enter">Continue to Workspace</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <header id="titlebar" class="titlebar hidden">
+    <div class="titlebar-left">
+      <svg class="brand-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0078d4" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+      <span class="titlebar-name">Termitron</span>
+    </div>
+    <div class="titlebar-center">
+      <div class="command-bar">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input id="top-quick-connect" type="text" data-i18n-placeholder="top_quick_ph" placeholder="Quick connect: user@host:22 (Enter)" />
+      </div>
+    </div>
+    <div class="titlebar-right">
+      <button id="btn-lang" class="btn sm" data-i18n-title="tt_lang" title="Switch Language (EN / TR)" style="height:22px;padding:0 7px;font-size:11px;font-weight:600;">EN</button>
+      <button id="btn-layout" class="icon-btn" data-i18n-title="tt_layout" title="Customize Workspace Layout">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="12" y1="3" x2="12" y2="12"/></svg>
+      </button>
+      <button id="btn-toggle-sidebar" class="icon-btn" data-i18n-title="tt_sidebar" title="Toggle Sidebar">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+      </button>
+      <button id="btn-toggle-panel" class="icon-btn" data-i18n-title="tt_panel" title="Toggle Terminal Panel">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="15" x2="21" y2="15"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="app" class="app hidden">
+    
+    <aside class="activity-bar">
+      <button class="act-btn active" data-view="hosts" data-i18n-title="act_hosts" title="Servers">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="1.5"/><rect x="2" y="14" width="20" height="7" rx="1.5"/><line x1="6" y1="6.5" x2="6.01" y2="6.5"/><line x1="6" y1="17.5" x2="6.01" y2="17.5"/></svg>
+      </button>
+      <button class="act-btn" data-view="explorer" data-i18n-title="act_explorer" title="Explorer">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      </button>
+      <button class="act-btn" data-view="search" data-i18n-title="act_search" title="Search on Server (grep)">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      </button>
+      <button class="act-btn" data-view="snippets" data-i18n-title="act_snippets" title="Snippets">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      </button>
+      <button class="act-btn" data-view="docker" data-i18n-title="act_docker" title="Docker">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+      </button>
+      <button class="act-btn" data-view="vnc" data-i18n-title="act_vnc" title="noVNC (Remote Desktop)">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      </button>
+      <button class="act-btn" data-view="known" data-i18n-title="act_known" title="Known Hosts">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+      </button>
+      <button class="act-btn" data-view="share" data-i18n-title="share_title" title="Server Sharing">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+      </button>
+      <div class="spacer"></div>
+      <button class="act-btn" data-view="settings" data-i18n-title="act_settings" title="Settings">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+    </aside>
+
+    <aside id="sidebar" class="sidebar">
+      <div id="sidebar-content"></div>
+    </aside>
+
+    <main id="main-area" class="main-area">
+      <section id="editor-pane" class="ws-pane editor-pane">
+        <div id="tab-bar" class="tab-bar"></div>
+        <div id="editor-area" class="editor-area">
+          <div id="welcome-view" class="welcome-view">
+            <div class="welcome-grid">
+              <div class="welcome-col">
+                <div class="welcome-head">
+                  <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#0078d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                  <div>
+                    <h2>Termitron</h2>
+                    <span class="muted" data-i18n="welcome_sub">SSH, SFTP, Terminal and Docker Workspace</span>
+                  </div>
+                </div>
+                <div class="welcome-section-title" data-i18n="welcome_start">Start</div>
+                <div class="welcome-links">
+                  <button class="link-row" id="welcome-add-host">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#3794ff" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                    <span data-i18n="welcome_add_host">Add New Server…</span>
+                  </button>
+                </div>
+                <div class="welcome-section-title" style="margin-top:20px;" data-i18n="welcome_quick">Quick Connect</div>
+                <div class="quick-box">
+                  <input id="quick-connect-input" type="text" data-i18n-placeholder="welcome_quick_ph" placeholder="user@host:22" />
+                  <button id="quick-connect-btn" class="btn primary" data-i18n="connect">Connect</button>
+                </div>
+              </div>
+              <div class="welcome-col">
+                <div class="welcome-section-title" data-i18n="welcome_recent">Saved Servers</div>
+                <div id="welcome-recent" class="welcome-recent"></div>
+              </div>
+            </div>
+          </div>
+
+          <div id="code-editor-wrap" class="code-editor-wrap hidden">
+            <div class="editor-toolbar">
+              <span id="editor-path" class="mono muted"></span>
+              <button id="editor-save-btn" class="btn primary sm" data-i18n="save_ctrl_s">Save (Ctrl+S)</button>
+            </div>
+            <textarea id="code-editor" spellcheck="false"></textarea>
+          </div>
+
+          <div id="docker-view" class="docker-view hidden"></div>
+          <div id="media-viewer" class="media-viewer hidden"></div>
+          <div id="term-editor-host" class="term-editor-host hidden"></div>
+        </div>
+      </section>
+
+      <section id="vnc-pane" class="ws-pane vnc-pane hidden">
+        <div id="vnc-tabs" class="tab-bar"></div>
+        <div id="vnc-view" class="vnc-view"></div>
+      </section>
+
+      <section id="term-panel" class="ws-pane term-panel">
+        <div id="term-resizer" class="term-resizer" title="Drag to resize"></div>
+        <div class="term-header">
+          <div class="term-panel-title" data-i18n="terminal_title">TERMINAL</div>
+          <div id="term-tabs" class="term-tabs"></div>
+          <div class="term-actions">
+            <button id="btn-new-term" class="icon-btn" data-i18n-title="tt_new_term" title="New Terminal">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+            <button id="btn-toggle-term-max" class="icon-btn" data-i18n-title="tt_max_term" title="Maximize/Restore Panel">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
+            <button id="btn-close-panel" class="icon-btn" data-i18n-title="tt_close_term" title="Close Panel">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="term-containers" class="term-containers"></div>
+      </section>
+    </main>
+  </div>
+
+  <footer id="status-bar" class="status-bar hidden">
+    <div class="status-left-group">
+      <div class="status-remote-pill">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        <span id="status-left" data-i18n="not_connected">Not connected</span>
+      </div>
+    </div>
+    <div class="status-right-group">
+      <span id="status-right" data-i18n="ws_connected">WebSocket Connected</span>
+      <span>UTF-8</span>
+    </div>
+  </footer>
+
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div id="modal-box" class="modal-box"></div>
+  </div>
+  <div id="toasts" class="toasts"></div>
+  <input id="file-upload-input" type="file" multiple class="hidden" />
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script src="i18n.js?v=15"></script>
+  <script src="app.js?v=15"></script>
+</body>
+</html>

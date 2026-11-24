@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Termitron Admin Panel</title>
+  <link rel="stylesheet" href="/style.css?v=7" />
+  <style>
+    body { overflow: auto; }
+    .adm-shell { max-width: 1180px; margin: 0 auto; padding: 20px; }
+    .adm-head { display: flex; align-items: center; justify-content: space-between; padding-bottom: 14px; border-bottom: 1px solid var(--border-strong); margin-bottom: 18px; }
+    .adm-tabs { display: flex; gap: 6px; margin-bottom: 18px; flex-wrap: wrap; }
+    .adm-tab { background: var(--bg-sidebar); border: 1px solid var(--border-strong); color: var(--muted); padding: 7px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+    .adm-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+    .adm-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 18px; }
+    .adm-card { background: var(--bg-sidebar); border: 1px solid var(--border-strong); border-radius: 6px; padding: 14px; }
+    .adm-card-lbl { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .adm-card-val { font-size: 22px; font-weight: 600; color: var(--ink-bright); margin-top: 6px; }
+    .adm-panel { background: var(--bg-sidebar); border: 1px solid var(--border-strong); border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+    .adm-panel h3 { margin: 0 0 12px; font-size: 14.5px; color: var(--ink-bright); display: flex; align-items: center; justify-content: space-between; }
+    .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; background: #262626; color: var(--muted); }
+    .badge.ok { background: rgba(63,185,80,0.16); color: var(--success); }
+    .badge.err { background: rgba(248,81,73,0.16); color: var(--error); }
+  </style>
+</head>
+<body>
+  <div id="adm-login" class="login-overlay">
+    <div class="login-card" style="max-width:400px;">
+      <div class="login-brand">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#0078d4" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <div>
+          <h1>Termitron Admin</h1>
+          <p class="muted">System, VPN, Users & Traffic Control</p>
+        </div>
+      </div>
+      <label class="field-label">Admin Key</label>
+      <input id="adm-key-input" type="password" placeholder="adm_..." autofocus />
+      <div id="adm-login-err" class="err-text"></div>
+      <button id="adm-login-btn" class="btn primary full">Sign In</button>
+    </div>
+  </div>
+
+  <div id="adm-app" class="adm-shell hidden">
+    <header class="adm-head">
+      <div style="display:flex;align-items:center;gap:12px;">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0078d4" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <h2 style="margin:0;color:var(--ink-bright);font-size:18px;">Termitron Admin Panel</h2>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <a href="/" class="btn sm" style="text-decoration:none;">Workspace</a>
+        <button id="adm-refresh" class="btn sm">Refresh</button>
+        <button id="adm-logout" class="btn danger sm">Sign Out</button>
+      </div>
+    </header>
+
+    <div class="adm-tabs">
+      <button class="adm-tab active" data-tab="overview">Overview & Traffic</button>
+      <button class="adm-tab" data-tab="vpn">Default VPN</button>
+      <button class="adm-tab" data-tab="users">Users</button>
+      <button class="adm-tab" data-tab="servers">Servers</button>
+      <button class="adm-tab" data-tab="system">System</button>
+    </div>
+
+    <div id="adm-content"></div>
+  </div>
+
+  <div id="toasts" class="toasts"></div>
+  <script src="/admin.js?v=7"></script>
+</body>
+</html>
