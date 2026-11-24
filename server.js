@@ -1971,13 +1971,13 @@ setInterval(() => {
 }, 25000).unref();
 
 server.listen(BIND_PORT, BIND_HOST, () => {
-  console.log(`Termitron (Node.js) başlatıldı: http://${BIND_HOST}:${BIND_PORT}`);
-  console.log(`Veri klasörü: ${store.DATA_DIR}`);
+  console.log(`Termitron (Node.js) started: http://${BIND_HOST}:${BIND_PORT}`);
+  console.log(`Data directory: ${store.DATA_DIR}`);
   console.log(`Admin Panel: http://${BIND_HOST}:${BIND_PORT}/admin (Admin Key: ${ADMIN_KEY})`);
   if (NO_AUTH) {
-    console.log('UYARI: Kimlik doğrulama devre dışı (--no-auth).');
+    console.log('WARNING: Authentication is disabled (--no-auth).');
   } else {
-    console.log(`Erişim şifresi / token: ${SECRET}`);
-    console.log(`Hızlı giriş adresi: http://${BIND_HOST}:${BIND_PORT}/?token=${SECRET}`);
+    console.log(`Access password / token: ${SECRET}`);
+    console.log(`Quick login URL: http://${BIND_HOST}:${BIND_PORT}/?token=${SECRET}`);
   }
 });
