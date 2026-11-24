@@ -17,6 +17,20 @@
 
 ## Quick Start
 
+### Docker
+
+```bash
+docker run -d \
+  --name termitron \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -e TERM_BIND=0.0.0.0:8080 \
+  -v termitron_data:/app/data \
+  termitron
+```
+
+### Node.js
+
 ```bash
 cd termitron
 npm install
