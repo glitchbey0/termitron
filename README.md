@@ -60,6 +60,7 @@ By default, the server starts on `http://127.0.0.1:8080` and prints the generate
 
 - **Created by:** Yusuf Ziya Hop
 - **Published by:** [@glitchbey0](https://github.com/glitchbey0)
+- **Built with:** Gemini 4 Hydrogen model
 
 ## License
 
