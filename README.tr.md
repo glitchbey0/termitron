@@ -60,6 +60,7 @@ Varsayılan olarak sunucu `http://127.0.0.1:8080` adresinde başlar ve oluşturu
 
 - **Geliştirici:** Yusuf Ziya Hop
 - **Yayınlayan:** [@glitchbey0](https://github.com/glitchbey0)
+- **Geliştirme Desteği:** Gemini 4 Hydrogen modeli ile geliştirilmiştir.
 
 ## Lisans
 
