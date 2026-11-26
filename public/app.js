@@ -101,20 +101,8 @@ function toast(text, kind = 'info') {
 }
 
 async function boot() {
+  localStorage.removeItem('trm_lang');
   applyStaticI18n();
-  const toggleLang = () => {
-    const next = getLang() === 'en' ? 'tr' : 'en';
-    localStorage.setItem('trm_lang', next);
-    applyStaticI18n();
-    renderSidebar();
-    renderWelcomeRecent();
-    renderTabs();
-    renderVncTabs();
-    renderTermTabs();
-    if (!state.activeSid) $('status-left').textContent = t('not_connected');
-  };
-  if ($('btn-lang')) $('btn-lang').onclick = toggleLang;
-  if ($('landing-lang')) $('landing-lang').onclick = toggleLang;
   state.token = sessionStorage.getItem('trm_web_token') || '';
 
   const st = await fetch(apiUrl('/api/auth/status')).then((r) => r.json()).catch(() => ({ auth_required: true, registration_enabled: true }));
@@ -186,7 +174,7 @@ $('register-btn').onclick = async () => {
     setTimeout(() => { $('reg-copy-btn').textContent = t('reg_copy'); }, 1500);
   };
   $('reg-enter-btn').onclick = () => {
-    showAuthLoader(getLang() === 'tr' ? 'Çalışma alanına giriliyor...' : 'Entering workspace...');
+    showAuthLoader('Entering workspace...');
     state.token = res.session_token;
     sessionStorage.setItem('trm_web_token', state.token);
     setTimeout(() => {
@@ -200,7 +188,7 @@ $('register-btn').onclick = async () => {
 async function submitLogin() {
   const token = $('login-token').value.trim();
   $('login-err').textContent = '';
-  showAuthLoader(getLang() === 'tr' ? 'Giriş yapılıyor...' : 'Signing in...');
+  showAuthLoader('Signing in...');
   const res = await fetch(apiUrl('/api/auth'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -757,7 +745,7 @@ function renderSidebar() {
         if (state.activeTermId) {
           wsSend({ type: 'term_input', termId: state.activeTermId, data: sn.command + '\n' });
           closeMobileSidebarIfNeeded();
-        } else toast('Aktif terminal yok.', 'warn');
+        } else toast('No active terminal.', 'warn');
       };
       list.appendChild(c);
     }
@@ -831,15 +819,9 @@ function renderSidebar() {
       list.appendChild(c);
     }
   } else if (state.view === 'settings') {
-    const curLang = getLang();
     el.innerHTML = `
       <div class="side-header"><span>${t('hdr_settings')}</span></div>
       <div class="side-body">
-        <label class="field-label">${t('set_lang')}</label>
-        <select id="set-lang">
-          <option value="en" ${curLang === 'en' ? 'selected' : ''}>English</option>
-          <option value="tr" ${curLang === 'tr' ? 'selected' : ''}>Türkçe</option>
-        </select>
         <label class="field-label">${t('set_font')}</label>
         <input id="set-fs" type="number" value="${state.settings.font_size || 14}" />
         <label class="field-label">${t('set_sb')}</label>
@@ -866,16 +848,16 @@ function renderSidebar() {
             ${(state.mcpLinks || []).map((l) => {
               const p = l.permissions || {};
               const permItems = [
-                ['connect', curLang === 'tr' ? 'Sunucuya Bağlanma' : 'Connect Server'],
-                ['exec', curLang === 'tr' ? 'Komut Çalıştırma' : 'Run Commands'],
-                ['hosts_add', curLang === 'tr' ? 'Sunucu Ekleme' : 'Add Server'],
-                ['hosts_edit', curLang === 'tr' ? 'Sunucu Düzenleme' : 'Edit Server'],
-                ['hosts_delete', curLang === 'tr' ? 'Sunucu Silme' : 'Delete Server'],
-                ['files_read', curLang === 'tr' ? 'Dosya Okuma' : 'Read Files'],
-                ['files_write', curLang === 'tr' ? 'Dosya Oluştur/Düzenle' : 'Create/Edit Files'],
-                ['files_delete', curLang === 'tr' ? 'Dosya Silme' : 'Delete Files'],
+                ['connect', 'Connect Server'],
+                ['exec', 'Run Commands'],
+                ['hosts_add', 'Add Server'],
+                ['hosts_edit', 'Edit Server'],
+                ['hosts_delete', 'Delete Server'],
+                ['files_read', 'Read Files'],
+                ['files_write', 'Create/Edit Files'],
+                ['files_delete', 'Delete Files'],
                 ['docker', 'Docker'],
-                ['share', curLang === 'tr' ? 'Paylaşım' : 'Sharing'],
+                ['share', 'Sharing'],
               ];
               return `
               <div style="padding:8px;border-radius:4px;background:var(--bg-editor);border:1px solid var(--border-strong);">
@@ -910,7 +892,7 @@ function renderSidebar() {
       </div>
     `;
     $('set-logout').onclick = () => {
-      showAuthLoader(getLang() === 'tr' ? 'Çıkış yapılıyor...' : 'Signing out...');
+      showAuthLoader('Signing out...');
       sessionStorage.removeItem('trm_web_token');
       sessionStorage.removeItem('trm_client_id');
       sessionStorage.removeItem('trm_active_sid');
@@ -964,16 +946,6 @@ function renderSidebar() {
         wsSend({ type: 'mcp_update_perms', id: mcpId, permissions });
       };
     });
-    $('set-lang').onchange = () => {
-      localStorage.setItem('trm_lang', $('set-lang').value);
-      applyStaticI18n();
-      renderSidebar();
-      renderWelcomeRecent();
-      renderTabs();
-      renderVncTabs();
-      renderTermTabs();
-      if (!state.activeSid) $('status-left').textContent = t('not_connected');
-    };
     $('set-save').onclick = () => {
       state.settings.font_size = Number($('set-fs').value) || 14;
       state.settings.scrollback = Number($('set-sb').value) || 5000;
@@ -1012,7 +984,7 @@ function renderTree(container, sid, sess, dir, depth) {
         return openRenameModal(sid, dir, e.name, full, e.isDir);
       }
       if (ev.target.closest('.del')) {
-        if (confirm(`${e.name} silinsin mi?`)) wsSend({ type: 'fs_delete', sid, path: full, isDir: e.isDir });
+        if (confirm(t('del_confirm', { name: e.name }))) wsSend({ type: 'fs_delete', sid, path: full, isDir: e.isDir });
         return;
       }
       if (e.isDir) {
@@ -2258,7 +2230,7 @@ function sendTermInputWithMods(termId, data) {
         try {
           text = await navigator.clipboard.readText();
         } catch {
-          text = prompt(getLang() === 'tr' ? 'Terminale yapıştırılacak metin:' : 'Paste text to terminal:') || '';
+          text = prompt('Paste text to terminal:') || '';
         }
         if (text) wsSend({ type: 'term_input', termId: inst.termId, data: text });
         return;
@@ -2306,9 +2278,9 @@ function copyTextFallback(text) {
   const copyBtn = $('term-sel-copy');
   const allBtn = $('term-sel-all');
   const clearBtn = $('term-sel-clear');
-  if (copyBtn) copyBtn.textContent = getLang() === 'tr' ? 'Kopyala' : 'Copy';
-  if (allBtn) allBtn.textContent = getLang() === 'tr' ? 'Tümü' : 'All';
-  if (clearBtn) clearBtn.textContent = getLang() === 'tr' ? 'Temizle' : 'Clear';
+  if (copyBtn) copyBtn.textContent = 'Copy';
+  if (allBtn) allBtn.textContent = 'All';
+  if (clearBtn) clearBtn.textContent = 'Clear';
 
   copyBtn?.addEventListener('pointerdown', async (e) => {
     e.preventDefault();
@@ -2317,7 +2289,7 @@ function copyTextFallback(text) {
     const txt = inst?.xterm?.getSelection() || '';
     if (!txt) return;
     const ok = await copyTextFallback(txt);
-    toast(ok ? (getLang() === 'tr' ? 'Panoya kopyalandı' : 'Copied to clipboard') : (getLang() === 'tr' ? 'Kopyalanamadı' : 'Copy failed'), ok ? 'ok' : 'err');
+    toast(ok ? 'Copied to clipboard' : 'Copy failed', ok ? 'ok' : 'err');
     inst?.xterm?.clearSelection();
     selBar.classList.add('hidden');
   });
@@ -2432,9 +2404,9 @@ function attachTouchScroll(xterm, el, fit = null) {
       const copyBtn = $('term-sel-copy');
       const allBtn = $('term-sel-all');
       const clearBtn = $('term-sel-clear');
-      if (copyBtn) copyBtn.textContent = getLang() === 'tr' ? 'Kopyala' : 'Copy';
-      if (allBtn) allBtn.textContent = getLang() === 'tr' ? 'Tümü' : 'All';
-      if (clearBtn) clearBtn.textContent = getLang() === 'tr' ? 'Temizle' : 'Clear';
+      if (copyBtn) copyBtn.textContent = 'Copy';
+      if (allBtn) allBtn.textContent = 'All';
+      if (clearBtn) clearBtn.textContent = 'Clear';
       selBar.classList.remove('hidden');
     } else {
       selBar.classList.add('hidden');

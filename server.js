@@ -1109,7 +1109,7 @@ function sudoExec(conn, pw, cmd, timeoutMs = 20000, maxBytes = 10 * 1024 * 1024,
 async function sudoList(conn, pw, dir) {
   const q = dockerMgr.quote(dir);
   const r = await sudoExec(conn, pw, `sh -c ${dockerMgr.quote(`ls -laL --time-style=+%s ${q} 2>/dev/null || ls -la ${q}`)}`);
-  if (r.code !== 0) throw new Error(r.err || 'Root listeleme hatası');
+  if (r.code !== 0) throw new Error(r.err || 'Root listing failed');
   const lines = r.out.toString('utf8').split(/\r?\n/);
   const out = [];
   for (const line of lines) {
@@ -1144,7 +1144,7 @@ app.get('/download/:id/:name', async (req, res) => {
   if (item.sudo) {
     try {
       const r = await sudoExec(item.conn, item.sudoPw, `cat -- ${dockerMgr.quote(item.path)}`);
-      if (r.code !== 0) return res.status(500).type('text/plain').send(r.err || 'Okuma hatası');
+      if (r.code !== 0) return res.status(500).type('text/plain').send(r.err || 'Read error');
       return res.send(r.out);
     } catch (e) {
       return res.status(500).type('text/plain').send(e?.message || 'Read error');
@@ -1189,7 +1189,7 @@ app.get('/api/media', async (req, res) => {
     if (sess.shared && !liveShare?.permissions?.sudo) return res.status(403).type('text/plain').send('Forbidden');
     try {
       const r = await sudoExec(sess.conn, sess.sudoPw, `cat -- ${dockerMgr.quote(filePath)}`);
-      if (r.code !== 0) return res.status(500).type('text/plain').send(r.err || 'Okuma hatası');
+      if (r.code !== 0) return res.status(500).type('text/plain').send(r.err || 'Read error');
       res.set({ 'Content-Type': mime, 'Cache-Control': 'no-store' });
       return res.send(r.out);
     } catch (e) {
@@ -1197,9 +1197,9 @@ app.get('/api/media', async (req, res) => {
     }
   }
 
-  if (!sess.sftp) return res.status(503).type('text/plain').send('SFTP hazır değil');
+  if (!sess.sftp) return res.status(503).type('text/plain').send('SFTP is not ready');
   sess.sftp.stat(filePath, (err, st) => {
-    if (err || !st) return res.status(404).type('text/plain').send(err?.message || 'Dosya bulunamadı');
+    if (err || !st) return res.status(404).type('text/plain').send(err?.message || 'File not found');
     const total = st.size || 0;
     const range = req.headers.range;
     if (range && total > 0) {
@@ -1301,7 +1301,7 @@ vncWss.on('connection', (ws, url, userId) => {
   }
   const sess = activeClientSessions.get(`${clientId}:${sid}`);
   if (!sess?.conn || sess.userId !== userId) {
-    ws.close(1011, 'Aktif SSH oturumu bulunamadı');
+    ws.close(1011, 'No active SSH session found');
     return;
   }
   if (sess.shared) {
@@ -1317,7 +1317,7 @@ vncWss.on('connection', (ws, url, userId) => {
   }
   sess.conn.forwardOut('127.0.0.1', 0, vncHost, vncPort, (err, stream) => {
     if (err || !stream) {
-      ws.close(1011, err?.message || 'VNC tüneli açılamadı');
+      ws.close(1011, err?.message || 'Failed to open VNC tunnel');
       return;
     }
     let paused = false;
@@ -1351,7 +1351,7 @@ vncWss.on('connection', (ws, url, userId) => {
     });
     stream.on('error', () => {
       clearDrain();
-      if (ws.readyState === 1) ws.close(1011, 'VNC akış hatası');
+      if (ws.readyState === 1) ws.close(1011, 'VNC stream error');
     });
     ws.on('message', (data) => {
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
@@ -1488,8 +1488,8 @@ wss.on('connection', (ws, req, userId = 'default') => {
 
     let password = pid && secrets[pid]?.password ? secrets[pid].password : (targetUid === userId ? effectiveProfile.password || '' : '');
     if ((effectiveProfile.auth || 'password') === 'password' && !password) {
-      const ans = await askSecret('SSH Şifresi', displayTarget, !!pid && matchesSaved && targetUid === userId);
-      if (!ans) throw new Error('Bağlantı iptal edildi.');
+      const ans = await askSecret('SSH Password', displayTarget, !!pid && matchesSaved && targetUid === userId);
+      if (!ans) throw new Error('Connection cancelled.');
       password = ans.value;
       if (ans.save && pid && matchesSaved && targetUid === userId) {
         const allSec = targetStore.loadSecrets();
@@ -1999,7 +1999,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
                 }
               }
               wsState.send({ type: 'sftp_ready', sid, ok: false, error: lastErr?.message || String(lastErr) });
-              wsState.toast(`SFTP açılamadı (${lastErr?.message || lastErr}); yalnızca terminal kullanılabilir.`, 'warn');
+              wsState.toast(`Failed to open SFTP (${lastErr?.message || lastErr}); terminal only.`, 'warn');
             })();
           } catch (e) {
             send({ type: 'connected', sid, ok: false, error: e.message || String(e) });
@@ -2036,7 +2036,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
             if (r.code === 0) { okPw = pw; break; }
           }
           if (okPw === null) {
-            const ans = await askSecret('sudo şifresi (root)', s.profile.name || s.profile.host, false);
+            const ans = await askSecret('sudo password (root)', s.profile.name || s.profile.host, false);
             if (ans && ans.value) {
               const r = await sudoExec(s.conn, ans.value, 'true');
               if (r.code === 0) okPw = ans.value;
@@ -2047,7 +2047,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
             s.sudoPw = okPw;
             send({ type: 'fs_swapped', sid: msg.sid, sudo: true, ok: true });
           } else {
-            send({ type: 'fs_swapped', sid: msg.sid, sudo: false, ok: false, error: 'Root (sudo) yetkisi doğrulanamadı.' });
+            send({ type: 'fs_swapped', sid: msg.sid, sudo: false, ok: false, error: 'Failed to verify root (sudo) privileges.' });
           }
           break;
         }
@@ -2057,7 +2057,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
           if (!requirePerm(s, 'files_read', true)) return send({ type: 'fs_listed', sid: msg.sid, dir: msg.dir, error: 'Permission denied: files_read' });
           if (s.sftpPromise) await s.sftpPromise;
           if (!s.sftp && !s.sudo) {
-            return send({ type: 'fs_listed', sid: msg.sid, dir: msg.dir, error: 'SFTP bu sunucuda kullanılamıyor.' });
+            return send({ type: 'fs_listed', sid: msg.sid, dir: msg.dir, error: 'SFTP is not available on this server.' });
           }
           if (s.sudo) {
             try {
@@ -2088,7 +2088,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
           if (!requirePerm(s, 'files_write')) return;
           if (s.sudo) {
             const r = await sudoExec(s.conn, s.sudoPw, `mkdir -p -- ${dockerMgr.quote(msg.path)}`);
-            if (r.code !== 0) toast(r.err || 'Klasör oluşturulamadı.', 'err');
+            if (r.code !== 0) toast(r.err || 'Failed to create folder.', 'err');
             else send({ type: 'fs_reload', sid: msg.sid, dir: posixParent(msg.path) });
             break;
           }
@@ -2104,7 +2104,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
           if (!requirePerm(s, 'files_write')) return;
           if (s.sudo) {
             const r = await sudoExec(s.conn, s.sudoPw, `touch -- ${dockerMgr.quote(msg.path)}`);
-            if (r.code !== 0) toast(r.err || 'Dosya oluşturulamadı.', 'err');
+            if (r.code !== 0) toast(r.err || 'Failed to create file.', 'err');
             else send({ type: 'fs_reload', sid: msg.sid, dir: posixParent(msg.path) });
             break;
           }
@@ -2120,7 +2120,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
           if (!requirePerm(s, 'files_write')) return;
           if (s.sudo) {
             const r = await sudoExec(s.conn, s.sudoPw, `mv -- ${dockerMgr.quote(msg.oldPath)} ${dockerMgr.quote(msg.newPath)}`);
-            if (r.code !== 0) toast(r.err || 'Yeniden adlandırılamadı.', 'err');
+            if (r.code !== 0) toast(r.err || 'Failed to rename.', 'err');
             else send({ type: 'fs_reload', sid: msg.sid, dir: posixParent(msg.newPath) });
             break;
           }
@@ -2136,12 +2136,12 @@ wss.on('connection', (ws, req, userId = 'default') => {
           if (!requirePerm(s, 'files_write')) return;
           const delPath = String(msg.path || '').trim();
           if (!delPath || delPath === '/' || delPath === '/*') {
-            return toast('Kök dizin silinemez.', 'err');
+            return toast('Cannot delete root directory.', 'err');
           }
           if (s.sudo) {
             const r = await sudoExec(s.conn, s.sudoPw, `rm -rf -- ${dockerMgr.quote(msg.path)}`);
-            if (r.code !== 0) toast(r.err || 'Silinemedi.', 'err');
-            else { toast('Silindi.', 'ok'); send({ type: 'fs_reload', sid: msg.sid, dir: posixParent(msg.path) }); }
+            if (r.code !== 0) toast(r.err || 'Failed to delete.', 'err');
+            else { toast('Deleted.', 'ok'); send({ type: 'fs_reload', sid: msg.sid, dir: posixParent(msg.path) }); }
             break;
           }
           if (msg.isDir) {
@@ -2149,7 +2149,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
           } else {
             await new Promise((res, rej) => s.sftp.unlink(msg.path, (e) => (e ? rej(e) : res())));
           }
-          toast('Silindi.', 'ok');
+          toast('Deleted.', 'ok');
           send({ type: 'fs_reload', sid: msg.sid, dir: posixParent(msg.path) });
           break;
         }
@@ -2158,7 +2158,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
           if (!s?.conn) return;
           if (!requirePerm(s, 'files_read', true)) return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: 'Permission denied: files_read' });
           if (!s.sftp && !s.sudo) {
-            return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: 'SFTP kullanılamıyor.' });
+            return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: 'SFTP is not available.' });
           }
           const MAX_EDIT_BYTES = 1024 * 1024;
           if (s.sudo) {
@@ -2166,22 +2166,22 @@ wss.on('connection', (ws, req, userId = 'default') => {
             const stRes = await sudoExec(s.conn, s.sudoPw, `sh -c ${dockerMgr.quote(`stat -c %s -- ${qPath} 2>/dev/null || wc -c < ${qPath}`)}`);
             const sz = parseInt(stRes.out.toString('utf8').trim(), 10);
             if (Number.isFinite(sz) && sz > MAX_EDIT_BYTES) {
-              return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: 'Dosya 1 MB sınırını aşıyor; indirebilirsiniz.' });
+              return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: 'File exceeds the 1 MB editor limit; you can download it instead.' });
             }
             const r = await sudoExec(s.conn, s.sudoPw, `head -c ${MAX_EDIT_BYTES + 1} -- ${qPath}`);
-            if (r.code !== 0) return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: r.err || 'Okunamadı.' });
-            if (r.out.length > MAX_EDIT_BYTES) return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: 'Dosya 1 MB sınırını aşıyor; indirebilirsiniz.' });
+            if (r.code !== 0) return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: r.err || 'Failed to read file.' });
+            if (r.out.length > MAX_EDIT_BYTES) return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: 'File exceeds the 1 MB editor limit; you can download it instead.' });
             if (r.out.subarray(0, 4096).includes(0)) {
-              return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: 'İkili (binary) dosya metin düzenleyicide açılamaz; indirebilirsiniz.' });
+              return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: 'Binary files cannot be opened in the text editor; you can download it instead.' });
             }
             return send({ type: 'fs_file', sid: msg.sid, path: msg.path, text: r.out.toString('utf8') });
           }
           s.sftp.stat(msg.path, (statErr, st) => {
             if (statErr || !st) {
-              return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: statErr?.message || 'Dosya okunamadı.' });
+              return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: statErr?.message || 'Failed to read file.' });
             }
             if ((st.size || 0) > MAX_EDIT_BYTES) {
-              return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: 'Dosya 1 MB sınırını aşıyor; indirebilirsiniz.' });
+              return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: 'File exceeds the 1 MB editor limit; you can download it instead.' });
             }
             const chunks = [];
             let total = 0;
@@ -2194,8 +2194,8 @@ wss.on('connection', (ws, req, userId = 'default') => {
                 aborted = true;
                 try { rs.destroy(); } catch {}
                 const msgErr = total > MAX_EDIT_BYTES
-                  ? 'Dosya 1 MB sınırını aşıyor; indirebilirsiniz.'
-                  : 'İkili (binary) dosya metin düzenleyicide açılamaz; indirebilirsiniz.';
+                  ? 'File exceeds the 1 MB editor limit; you can download it instead.'
+                  : 'Binary files cannot be opened in the text editor; you can download it instead.';
                 return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: msgErr });
               }
               chunks.push(c);
@@ -2207,7 +2207,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
               if (aborted) return;
               const buf = Buffer.concat(chunks);
               if (buf.subarray(0, 4096).includes(0)) {
-                return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: 'İkili (binary) dosya metin düzenleyicide açılamaz; indirebilirsiniz.' });
+                return send({ type: 'fs_file', sid: msg.sid, path: msg.path, error: 'Binary files cannot be opened in the text editor; you can download it instead.' });
               }
               send({ type: 'fs_file', sid: msg.sid, path: msg.path, text: buf.toString('utf8') });
             });
@@ -2219,19 +2219,19 @@ wss.on('connection', (ws, req, userId = 'default') => {
           if (!s?.conn || (!s.sftp && !s.sudo)) return;
           if (!requirePerm(s, 'files_write')) return;
           if (typeof msg.text !== 'string' || msg.text.length > 5 * 1024 * 1024) {
-            return toast('Dosya boyutu sınırı aşıldı.', 'err');
+            return toast('File size limit exceeded.', 'err');
           }
           const buf = Buffer.from(msg.text, 'utf8');
           if (s.sudo) {
             const r = await sudoExec(s.conn, s.sudoPw, `tee -- ${dockerMgr.quote(msg.path)} >/dev/null`, 25000, 1024 * 1024, buf);
-            if (r.code !== 0) toast(r.err || 'Kaydedilemedi.', 'err');
-            else { toast(`Kaydedildi: ${posixBase(msg.path)}`, 'ok'); send({ type: 'fs_saved', sid: msg.sid, path: msg.path }); }
+            if (r.code !== 0) toast(r.err || 'Failed to save.', 'err');
+            else { toast(`Saved: ${posixBase(msg.path)}`, 'ok'); send({ type: 'fs_saved', sid: msg.sid, path: msg.path }); }
             break;
           }
           const w = s.sftp.createWriteStream(msg.path);
-          w.on('error', (e) => toast(`Kaydedilemedi: ${e.message}`, 'err'));
+          w.on('error', (e) => toast(`Failed to save: ${e.message}`, 'err'));
           w.on('close', () => {
-            toast(`Kaydedildi: ${posixBase(msg.path)}`, 'ok');
+            toast(`Saved: ${posixBase(msg.path)}`, 'ok');
             send({ type: 'fs_saved', sid: msg.sid, path: msg.path });
           });
           w.end(buf);
@@ -2243,23 +2243,23 @@ wss.on('connection', (ws, req, userId = 'default') => {
           if (!requirePerm(s, 'files_write')) return;
           const safeName = posixBase(String(msg.name || '').trim());
           if (!safeName || safeName === '.' || safeName === '..') {
-            return toast('Geçersiz dosya adı.', 'err');
+            return toast('Invalid file name.', 'err');
           }
           if (typeof msg.base64 !== 'string' || msg.base64.length > 26 * 1024 * 1024) {
-            return toast('Dosya boyutu sınırı aşıldı.', 'err');
+            return toast('File size limit exceeded.', 'err');
           }
           const dst = posixJoin(String(msg.dir || '/'), safeName);
           const buf = Buffer.from(msg.base64, 'base64');
           if (s.sudo) {
             const r = await sudoExec(s.conn, s.sudoPw, `tee -- ${dockerMgr.quote(dst)} >/dev/null`, 60000, 1024 * 1024, buf);
-            if (r.code !== 0) toast(r.err || 'Yükleme hatası.', 'err');
-            else { toast(`Yüklendi: ${safeName}`, 'ok'); send({ type: 'fs_reload', sid: msg.sid, dir: msg.dir }); }
+            if (r.code !== 0) toast(r.err || 'Upload failed.', 'err');
+            else { toast(`Uploaded: ${safeName}`, 'ok'); send({ type: 'fs_reload', sid: msg.sid, dir: msg.dir }); }
             break;
           }
           const w = s.sftp.createWriteStream(dst);
-          w.on('error', (e) => toast(`Yükleme hatası: ${e.message}`, 'err'));
+          w.on('error', (e) => toast(`Upload failed: ${e.message}`, 'err'));
           w.on('close', () => {
-            toast(`Yüklendi: ${safeName}`, 'ok');
+            toast(`Uploaded: ${safeName}`, 'ok');
             send({ type: 'fs_reload', sid: msg.sid, dir: msg.dir });
           });
           w.end(buf);
@@ -2284,7 +2284,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
           if (terms.size >= 30) return toast('Maximum concurrent terminals reached (30).', 'err');
           const termId = allocId();
           const s = sessions.get(msg.sid);
-          if (!s?.conn) return toast('Önce sunucuya bağlanın.', 'warn');
+          if (!s?.conn) return toast('Connect to a server first.', 'warn');
           if (!requirePerm(s, 'terminal')) return;
           const dockerId = msg.dockerId ? String(msg.dockerId).trim() : '';
           if (dockerId) {
@@ -2429,7 +2429,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
         }
         case 'search_grep': {
           const s = sessions.get(msg.sid);
-          if (!s?.conn) return toast('Önce bir sunucuya bağlanın.', 'warn');
+          if (!s?.conn) return toast('Connect to a server first.', 'warn');
           if (!requirePerm(s, 'files_read')) return send({ type: 'search_results', results: [] });
           const cmd = `grep -rnF -- ${dockerMgr.quote(msg.query)} ${dockerMgr.quote(msg.dir || '/')} 2>/dev/null | head -200`;
           const { out } = await dockerMgr.execCmd(s.conn, cmd);
