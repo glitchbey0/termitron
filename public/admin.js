@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const BASE_PATH = location.pathname.replace(/\/admin(\/index\.html)?\/?$/, '').replace(/\/$/, '');
+const BASE_PATH = location.pathname.replace(/\/[^/]+\/?$/, '').replace(/\/$/, '');
 const apiUrl = (p) => `${BASE_PATH}${p.startsWith('/') ? p : '/' + p}`;
 const state = {
   token: sessionStorage.getItem('trm_admin_token') || '',
@@ -54,30 +54,44 @@ async function api(url, method = 'GET', body = null) {
   return r.json();
 }
 
+function showAuthLoader(text) {
+  if ($('auth-loader-text')) $('auth-loader-text').textContent = text || 'Loading...';
+  $('auth-loader')?.classList.remove('hidden');
+}
+function hideAuthLoader() {
+  $('auth-loader')?.classList.add('hidden');
+}
+
 async function login() {
   $('adm-login-err').textContent = '';
   const key = $('adm-key-input').value.trim();
+  showAuthLoader('Signing in...');
   const res = await fetch(apiUrl('/api/admin/login'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ key }),
   }).then((r) => r.json()).catch(() => ({ ok: false, error: 'Network error' }));
   if (!res.ok) {
+    hideAuthLoader();
     $('adm-login-err').textContent = res.error || 'Invalid key';
     return;
   }
   state.token = res.token;
   sessionStorage.setItem('trm_admin_token', state.token);
-  $('adm-login').classList.add('hidden');
-  $('adm-app').classList.remove('hidden');
-  loadAll();
+  setTimeout(() => {
+    $('adm-login').classList.add('hidden');
+    $('adm-app').classList.remove('hidden');
+    hideAuthLoader();
+    loadAll();
+  }, 450);
 }
 
 $('adm-login-btn').onclick = login;
 $('adm-key-input').onkeydown = (e) => { if (e.key === 'Enter') login(); };
 $('adm-logout').onclick = () => {
+  showAuthLoader('Signing out...');
   sessionStorage.removeItem('trm_admin_token');
-  location.reload();
+  setTimeout(() => location.reload(), 450);
 };
 $('adm-refresh').onclick = loadAll;
 
@@ -266,34 +280,47 @@ function render() {
       loadAll();
     };
   } else if (state.tab === 'users') {
+    const regEnabled = ov.registrationEnabled !== false;
     root.innerHTML = `
       <div class="adm-panel">
         <h3>
-          <span>Users (${state.users.length})</span>
-          <button class="btn primary sm" id="adm-new-user">+ Create User Key</button>
+          <span>Users (${state.users.length}) &nbsp;<span class="badge ${regEnabled ? 'ok' : 'err'}">${regEnabled ? 'Registration Open' : 'Registration Closed'}</span></span>
+          <div style="display:flex;gap:6px;">
+            <button class="btn sm ${regEnabled ? 'danger' : ''}" id="adm-toggle-reg">${regEnabled ? 'Disable Registration' : 'Enable Registration'}</button>
+            <button class="btn primary sm" id="adm-new-user">+ Create User Key</button>
+          </div>
         </h3>
         <div id="adm-new-key-box" class="reg-key-box hidden" style="margin-bottom:12px;"></div>
         <table class="tbl">
-          <thead><tr><th>User ID</th><th>Created</th><th>Servers</th><th>Active</th><th>Traffic (RX/TX)</th><th>Status</th><th>Actions</th></tr></thead>
+          <thead><tr><th>User ID</th><th>Note</th><th>Created</th><th>Servers</th><th>Active</th><th>Traffic (RX/TX)</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>
             ${state.users.length ? state.users.map((u) => `
               <tr>
                 <td class="mono">${esc(u.userId)}</td>
+                <td><span class="muted" title="${esc(u.note || '')}" style="max-width:180px;display:inline-block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;">${esc(u.note || '-')}</span></td>
                 <td class="muted">${fmtTime(u.createdAt)}</td>
                 <td>${u.hostCount}</td>
                 <td>${u.activeSessions}</td>
                 <td class="mono">${fmtBytes(u.bytesRx)} / ${fmtBytes(u.bytesTx)}</td>
                 <td><span class="badge ${u.disabled ? 'err' : 'ok'}">${u.disabled ? 'Disabled' : 'Active'}</span></td>
                 <td>
+                  <button class="btn sm note-user" data-id="${esc(u.userId)}" data-note="${esc(u.note || '')}">Note</button>
                   <button class="btn sm toggle-user" data-id="${esc(u.userId)}" data-dis="${u.disabled ? '0' : '1'}">${u.disabled ? 'Enable' : 'Disable'}</button>
                   <button class="btn danger sm del-user" data-id="${esc(u.userId)}">Delete</button>
                 </td>
               </tr>
-            `).join('') : '<tr><td colspan="7" class="muted">No registered users yet.</td></tr>'}
+            `).join('') : '<tr><td colspan="8" class="muted">No registered users yet.</td></tr>'}
           </tbody>
         </table>
       </div>
     `;
+    $('adm-toggle-reg').onclick = async () => {
+      const next = !(ov.registrationEnabled !== false);
+      const r = await api('/api/admin/registration/policy', 'POST', { registrationEnabled: next });
+      if (r.ok && state.overview) state.overview.registrationEnabled = r.registrationEnabled;
+      toast(next ? 'User registration enabled.' : 'User registration disabled.');
+      render();
+    };
     $('adm-new-user').onclick = async () => {
       const r = await api('/api/admin/users/create', 'POST', {});
       if (r.ok) {
@@ -303,6 +330,42 @@ function render() {
         loadAll();
       }
     };
+    root.querySelectorAll('.note-user').forEach((b) => {
+      b.onclick = () => {
+        const uid = b.dataset.id;
+        const curNote = b.dataset.note || '';
+        const bd = $('adm-modal-backdrop');
+        const box = $('adm-modal-box');
+        box.innerHTML = `
+          <h3 style="margin:0 0 6px;">User Note</h3>
+          <p class="muted mono" style="font-size:12px;margin:0 0 12px;">${esc(uid)}</p>
+          <label class="field-label">Note</label>
+          <textarea id="adm-note-inp" rows="4" placeholder="e.g. Ahmet - Prod Server" maxlength="200" style="width:100%;resize:vertical;word-break:break-word;">${esc(curNote)}</textarea>
+          <div class="modal-actions">
+            <button class="btn" id="adm-note-cancel">Cancel</button>
+            <button class="btn primary" id="adm-note-save">Save</button>
+          </div>
+        `;
+        bd.classList.remove('hidden');
+        const inp = $('adm-note-inp');
+        inp.focus();
+        inp.select();
+        const close = () => bd.classList.add('hidden');
+        const save = async () => {
+          await api('/api/admin/users/note', 'POST', { userId: uid, note: inp.value });
+          close();
+          toast('Note saved.');
+          loadAll();
+        };
+        $('adm-note-cancel').onclick = close;
+        $('adm-note-save').onclick = save;
+        inp.onkeydown = (e) => {
+          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); save(); }
+          if (e.key === 'Escape') close();
+        };
+        bd.onclick = (e) => { if (e.target === bd) close(); };
+      };
+    });
     root.querySelectorAll('.toggle-user').forEach((b) => {
       b.onclick = async () => {
         await api('/api/admin/users/toggle', 'POST', { userId: b.dataset.id, disabled: b.dataset.dis === '1' });

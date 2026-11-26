@@ -56,7 +56,7 @@ function issueSessionToken(userId) {
   sessionTokens.set(tok, { userId, exp: Date.now() + SESSION_TTL_MS });
   return tok;
 }
-function authenticateToken(tok) {
+function authenticateToken(tok, { allowMcp = false } = {}) {
   if (NO_AUTH) return { ok: true, userId: 'default' };
   if (!tok || typeof tok !== 'string' || tok.length > 256) return null;
   if (safeEqual(tok, SECRET)) return { ok: true, userId: 'default' };
@@ -71,8 +71,10 @@ function authenticateToken(tok) {
   }
   const kUid = store.findUserByKey(tok);
   if (kUid && store.userExists(kUid)) return { ok: true, userId: kUid };
-  const mUid = store.findUserByMcpToken(tok);
-  if (mUid && store.userExists(mUid)) return { ok: true, userId: mUid };
+  if (allowMcp) {
+    const mUid = store.findUserByMcpToken(tok);
+    if (mUid && store.userExists(mUid)) return { ok: true, userId: mUid };
+  }
   return null;
 }
 
@@ -138,6 +140,7 @@ app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   res.setHeader(
     'Content-Security-Policy',
     "default-src 'self' https://cdn.jsdelivr.net; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; frame-ancestors 'none';"
@@ -150,21 +153,59 @@ function stripBasePath(u) {
   if (BASE_PATH && (u === BASE_PATH || u.startsWith(BASE_PATH + '/') || u.startsWith(BASE_PATH + '?'))) {
     return u.slice(BASE_PATH.length) || '/';
   }
-  const m = u.match(/^\/[^/?#]+(\/(?:api|ws|ws-vnc|admin|download|mcp|novnc)(?:[/?#].*)?|\/[^/?#]+\.(?:js|css|html|svg|png|ico)(?:\?.*)?)$/);
-  if (m) return m[1];
+  const adminSeg = (store.getSetup().adminPath || '/admin').replace(/^\/+|\/+$/g, '');
+  const adminEsc = adminSeg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const routeRe = new RegExp(`^\\/([^/?#]+)(\\/(?:api|ws|ws-vnc|admin|download|mcp|novnc|oauth|\\.well-known${adminEsc ? '|' + adminEsc : ''})(?:[/?#].*)?|\\/[^/?#]+\\.(?:js|css|html|svg|png|ico)(?:\\?.*)?)$`);
+  const m = u.match(routeRe);
+  if (m && !/^(?:api|ws|ws-vnc|admin|download|mcp|novnc|oauth|\.well-known)$/i.test(m[1])) return m[2];
   return u;
 }
 
-app.use(express.json({ limit: '1mb' }));
 app.use((req, res, next) => {
   req.url = stripBasePath(req.url);
+  if (/^\/(?:api|oauth|mcp)(?:\/|$)/.test(req.url)) {
+    res.setHeader('Cache-Control', 'no-store');
+  }
   next();
 });
+app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/novnc', express.static(path.join(__dirname, 'node_modules', '@novnc', 'novnc')));
 
 app.get('/api/auth/status', (req, res) => {
-  res.json({ auth_required: !NO_AUTH });
+  res.json({
+    auth_required: !NO_AUTH,
+    registration_enabled: store.getGlobalPolicy().registrationEnabled !== false,
+    setup_required: !store.getSetup().setupDone,
+  });
+});
+
+app.get('/api/setup/info', (req, res) => {
+  const st = store.getSetup();
+  if (st.setupDone) return res.status(403).json({ ok: false, error: 'Setup already completed.' });
+  res.json({
+    ok: true,
+    adminKey: ADMIN_KEY,
+    accessToken: SECRET,
+    adminPath: st.adminPath || '/admin',
+  });
+});
+
+app.post('/api/setup', (req, res) => {
+  const st = store.getSetup();
+  if (st.setupDone) return res.status(403).json({ ok: false, error: 'Setup already completed.' });
+  try {
+    if (req.body?.adminKey && String(req.body.adminKey).trim()) {
+      ADMIN_KEY = store.setAdminKey(req.body.adminKey);
+    }
+    const saved = store.saveSetup({
+      setupDone: true,
+      adminPath: req.body?.adminPath || '/admin',
+    });
+    res.json({ ok: true, adminPath: saved.adminPath });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
 });
 
 app.post('/api/auth', (req, res) => {
@@ -184,6 +225,9 @@ app.post('/api/auth', (req, res) => {
 });
 
 app.post('/api/register', (req, res) => {
+  if (store.getGlobalPolicy().registrationEnabled === false) {
+    return res.status(403).json({ ok: false, error: 'Registration is disabled by administrator.' });
+  }
   const ip = req.ip || req.socket?.remoteAddress || 'unknown';
   if (!checkRegRate(ip)) {
     return res.status(429).json({ ok: false, error: 'Too many registrations. Try again later.' });
@@ -201,7 +245,7 @@ function resolveMcpAuth(req) {
   if (!checkAuthRate(ip)) return null;
   const hdr = req.headers.authorization || '';
   const tok = req.params?.token || (hdr.startsWith('Bearer ') ? hdr.slice(7).trim() : '') || String(req.headers['x-api-key'] || req.query.token || '');
-  const auth = authenticateToken(tok);
+  const auth = authenticateToken(tok, { allowMcp: true });
   if (!auth) {
     recordAuthFailure(ip);
     return null;
@@ -243,27 +287,332 @@ function disconnectMcpByToken(uid, idOrToken) {
   return closed;
 }
 
-app.get(['/mcp', '/mcp/:token'], (req, res) => {
+function getPublicBaseUrl(req) {
+  const rawProto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim().toLowerCase();
+  const proto = rawProto === 'http' ? 'http' : 'https';
+  const rawHost = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost').split(',')[0].trim();
+  const host = /^[a-zA-Z0-9._:\[\]-]{1,253}$/.test(rawHost) ? rawHost : 'localhost';
+  const origPath = (req.originalUrl || req.url || '').split('?')[0];
+  let prefix = BASE_PATH;
+  if (!prefix) {
+    const m = origPath.match(/^\/([^/]+)\/(?:mcp|oauth|\.well-known)(?:\/|$)/);
+    if (m && !/^(?:api|ws|ws-vnc|admin|download|mcp|novnc|oauth|\.well-known)$/i.test(m[1])) {
+      prefix = '/' + m[1];
+    }
+  }
+  return `${proto}://${host}${prefix}`;
+}
+
+app.use(['/.well-known', '/oauth', '/mcp', '/mcp/:token'], (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID');
+  res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id, WWW-Authenticate');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
+
+function extractMcpTokenFromPath(p) {
+  const m = String(p || '').match(/\/(mcp_[a-fA-F0-9]{16,64})(?:\/|$)/);
+  return m ? m[1] : '';
+}
+
+app.get([
+  '/.well-known/oauth-protected-resource',
+  '/.well-known/oauth-protected-resource/*',
+  '/mcp/.well-known/oauth-protected-resource',
+  '/mcp/:token/.well-known/oauth-protected-resource',
+], (req, res) => {
+  const baseUrl = getPublicBaseUrl(req);
+  const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+  const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
+  const origin = `${proto}://${host}`;
+  const origPath = (req.originalUrl || req.url || '').split('?')[0];
+  let resourceUrl = `${baseUrl}/mcp`;
+  const wkIdx = origPath.indexOf('/.well-known/oauth-protected-resource');
+  if (wkIdx !== -1) {
+    const before = origPath.slice(0, wkIdx);
+    const after = origPath.slice(wkIdx + '/.well-known/oauth-protected-resource'.length);
+    if (after && after.length > 1) {
+      resourceUrl = `${origin}${after.startsWith('/term') || ! baseUrl.endsWith('/term') ? after : '/term' + after}`;
+    } else if (before && /\/mcp(?:\/|$)/.test(before)) {
+      resourceUrl = `${origin}${before}`;
+    }
+  }
+  const tok = req.params?.token || extractMcpTokenFromPath(origPath);
+  const authServer = tok ? `${baseUrl}/mcp/${tok}` : baseUrl;
+  res.json({
+    resource: resourceUrl,
+    authorization_servers: [authServer],
+    bearer_methods_supported: ['header', 'query'],
+  });
+});
+
+app.get([
+  '/.well-known/oauth-authorization-server',
+  '/.well-known/oauth-authorization-server/*',
+  '/.well-known/openid-configuration',
+  '/.well-known/openid-configuration/*',
+  '/mcp/.well-known/oauth-authorization-server',
+  '/mcp/:token/.well-known/oauth-authorization-server',
+  '/mcp/.well-known/openid-configuration',
+  '/mcp/:token/.well-known/openid-configuration',
+], (req, res) => {
+  const baseUrl = getPublicBaseUrl(req);
+  const origPath = (req.originalUrl || req.url || '').split('?')[0];
+  const tok = req.params?.token || extractMcpTokenFromPath(origPath);
+  const issuer = tok ? `${baseUrl}/mcp/${tok}` : baseUrl;
+  const authEndpoint = tok ? `${baseUrl}/oauth/authorize?token=${encodeURIComponent(tok)}` : `${baseUrl}/oauth/authorize`;
+  const tokenEndpoint = tok ? `${baseUrl}/oauth/token?token=${encodeURIComponent(tok)}` : `${baseUrl}/oauth/token`;
+  res.json({
+    issuer,
+    authorization_endpoint: authEndpoint,
+    token_endpoint: tokenEndpoint,
+    registration_endpoint: `${baseUrl}/oauth/register`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code', 'refresh_token', 'client_credentials'],
+    token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
+    code_challenge_methods_supported: ['S256', 'plain'],
+  });
+});
+
+const oauthClients = new Map();
+const oauthCodes = new Map();
+const TRUSTED_OAUTH_HOSTS = new Set([
+  'vertexaisearch.google.com',
+  'gemini.google.com',
+  'claude.ai',
+  'chatgpt.com',
+  'chat.openai.com',
+  'localhost',
+  '127.0.0.1',
+]);
+
+function escHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function isAllowedRedirectUri(rawUri, clientId = '') {
+  try {
+    const u = new URL(String(rawUri || ''));
+    const isLocal = u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1');
+    if (u.protocol !== 'https:' && !isLocal) return false;
+    if (clientId && oauthClients.has(clientId)) {
+      const rec = oauthClients.get(clientId);
+      if (rec.redirectUris.length > 0) return rec.redirectUris.includes(u.toString());
+    }
+    return TRUSTED_OAUTH_HOSTS.has(u.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function issueOauthCode(rawToken, redirectUri, codeChallenge = '', codeChallengeMethod = '') {
+  if (oauthCodes.size >= 1000) {
+    const first = oauthCodes.keys().next().value;
+    if (first) oauthCodes.delete(first);
+  }
+  const code = 'oa_' + crypto.randomBytes(24).toString('hex');
+  oauthCodes.set(code, {
+    rawToken,
+    redirectUri,
+    codeChallenge,
+    codeChallengeMethod,
+    exp: Date.now() + 2 * 60 * 1000,
+  });
+  return code;
+}
+
+app.post('/oauth/register', (req, res) => {
+  const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+  if (!checkRegRate(ip)) return res.status(429).json({ error: 'too_many_requests' });
+  const rawUris = Array.isArray(req.body?.redirect_uris) ? req.body.redirect_uris : [];
+  const validUris = [];
+  for (const r of rawUris.slice(0, 10)) {
+    try {
+      const u = new URL(String(r));
+      const isLocal = u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1');
+      if (u.protocol === 'https:' || isLocal) validUris.push(u.toString());
+    } catch {}
+  }
+  if (oauthClients.size >= 500) {
+    const first = oauthClients.keys().next().value;
+    if (first) oauthClients.delete(first);
+  }
+  const clientId = 'trm_client_' + crypto.randomBytes(8).toString('hex');
+  const clientSecret = 'trm_secret_' + crypto.randomBytes(16).toString('hex');
+  oauthClients.set(clientId, { clientSecret, redirectUris: validUris, createdAt: Date.now() });
+  res.status(201).json({
+    client_id: clientId,
+    client_secret: clientSecret,
+    client_id_issued_at: Math.floor(Date.now() / 1000),
+    client_secret_expires_at: 0,
+    redirect_uris: validUris,
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+    token_endpoint_auth_method: req.body?.token_endpoint_auth_method || 'none',
+  });
+});
+
+app.get('/oauth/authorize', (req, res) => {
+  const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+  if (!checkAuthRate(ip)) return res.status(429).send('Too many requests');
+  const redirectUri = String(req.query.redirect_uri || '').trim();
+  const state = String(req.query.state || '').slice(0, 512);
+  const clientId = String(req.query.client_id || '').slice(0, 128);
+  const codeChallenge = String(req.query.code_challenge || '').slice(0, 256);
+  const codeChallengeMethod = String(req.query.code_challenge_method || '').slice(0, 16);
+  if (!isAllowedRedirectUri(redirectUri, clientId)) {
+    return res.status(400).send('Invalid redirect_uri');
+  }
+  const preToken = String(req.query.token || '').trim();
+  if (preToken && authenticateToken(preToken, { allowMcp: true })) {
+    const code = issueOauthCode(preToken, redirectUri, codeChallenge, codeChallengeMethod);
+    const u = new URL(redirectUri);
+    u.searchParams.set('code', code);
+    if (state) u.searchParams.set('state', state);
+    return res.redirect(u.toString());
+  }
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Termitron MCP Authorization</title><style>body{background:#121212;color:#eee;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:16px}form{background:#1e1e1e;border:1px solid #333;border-radius:8px;padding:24px;width:100%;max-width:380px}input{width:100%;box-sizing:border-box;padding:10px;margin:10px 0 16px;background:#2a2a2a;border:1px solid #444;color:#fff;border-radius:4px;font-size:14px}button{width:100%;padding:10px;background:#0078d4;color:#fff;border:none;border-radius:4px;font-size:14px;font-weight:600;cursor:pointer}</style></head><body><form method="POST" action=""><h3 style="margin:0 0 8px">Authorize Termitron MCP</h3><p style="font-size:13px;color:#aaa;margin:0 0 12px">Enter your Termitron MCP Token (mcp_...):</p><input type="hidden" name="redirect_uri" value="${escHtml(redirectUri)}"><input type="hidden" name="state" value="${escHtml(state)}"><input type="hidden" name="client_id" value="${escHtml(clientId)}"><input type="hidden" name="code_challenge" value="${escHtml(codeChallenge)}"><input type="hidden" name="code_challenge_method" value="${escHtml(codeChallengeMethod)}"><input type="password" name="token" placeholder="mcp_..." required autofocus><button type="submit">Approve &amp; Connect</button></form></body></html>`);
+});
+
+app.post('/oauth/authorize', express.urlencoded({ extended: false }), (req, res) => {
+  const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+  if (!checkAuthRate(ip)) return res.status(429).send('Too many requests');
+  const redirectUri = String(req.body?.redirect_uri || '').trim();
+  const state = String(req.body?.state || '').slice(0, 512);
+  const clientId = String(req.body?.client_id || '').slice(0, 128);
+  const codeChallenge = String(req.body?.code_challenge || '').slice(0, 256);
+  const codeChallengeMethod = String(req.body?.code_challenge_method || '').slice(0, 16);
+  const tok = String(req.body?.token || '').trim();
+  if (!isAllowedRedirectUri(redirectUri, clientId)) {
+    return res.status(400).send('Invalid redirect_uri');
+  }
+  if (!tok || !authenticateToken(tok, { allowMcp: true })) {
+    recordAuthFailure(ip);
+    return res.status(401).send('Invalid token');
+  }
+  authFailures.delete(ip);
+  const code = issueOauthCode(tok, redirectUri, codeChallenge, codeChallengeMethod);
+  const u = new URL(redirectUri);
+  u.searchParams.set('code', code);
+  if (state) u.searchParams.set('state', state);
+  return res.redirect(u.toString());
+});
+
+app.post('/oauth/token', express.urlencoded({ extended: false }), (req, res) => {
+  const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+  if (!checkAuthRate(ip)) return res.status(429).json({ error: 'too_many_requests' });
+  const grantType = String(req.body?.grant_type || 'authorization_code');
+  if (grantType === 'refresh_token') {
+    const rt = String(req.body?.refresh_token || '').trim();
+    if (!rt || !authenticateToken(rt, { allowMcp: true })) {
+      recordAuthFailure(ip);
+      return res.status(400).json({ error: 'invalid_grant' });
+    }
+    return res.json({ access_token: rt, token_type: 'Bearer', expires_in: 3600, refresh_token: rt });
+  }
+  const code = String(req.body?.code || '').trim();
+  const rec = code ? oauthCodes.get(code) : null;
+  if (code) oauthCodes.delete(code);
+  if (!rec || Date.now() > rec.exp) {
+    const qTok = String(req.query?.token || '').trim();
+    if (grantType === 'client_credentials' && qTok && authenticateToken(qTok, { allowMcp: true })) {
+      return res.json({ access_token: qTok, token_type: 'Bearer', expires_in: 3600 });
+    }
+    recordAuthFailure(ip);
+    return res.status(400).json({ error: 'invalid_grant', error_description: 'Invalid or expired code' });
+  }
+  if (req.body?.redirect_uri && String(req.body.redirect_uri) !== rec.redirectUri) {
+    return res.status(400).json({ error: 'invalid_grant', error_description: 'redirect_uri mismatch' });
+  }
+  if (rec.codeChallenge) {
+    const verifier = String(req.body?.code_verifier || '');
+    const expected = rec.codeChallengeMethod === 'S256'
+      ? crypto.createHash('sha256').update(verifier).digest('base64url')
+      : verifier;
+    if (!verifier || !safeEqual(expected, rec.codeChallenge)) {
+      return res.status(400).json({ error: 'invalid_grant', error_description: 'PKCE verification failed' });
+    }
+  }
+  if (!authenticateToken(rec.rawToken, { allowMcp: true })) {
+    return res.status(400).json({ error: 'invalid_grant' });
+  }
+  res.json({
+    access_token: rec.rawToken,
+    token_type: 'Bearer',
+    expires_in: 3600,
+    refresh_token: rec.rawToken,
+  });
+});
+
+app.head(['/mcp', '/mcp/:token', '/mcp/:token/sse'], (req, res) => {
   const auth = resolveMcpAuth(req);
-  if (!auth) return res.status(401).send('Unauthorized');
+  if (!auth) {
+    const baseUrl = getPublicBaseUrl(req);
+    res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`);
+    return res.status(401).end();
+  }
+  res.status(200).end();
+});
+
+app.get(['/mcp', '/mcp/:token', '/mcp/:token/sse'], (req, res) => {
+  const auth = resolveMcpAuth(req);
+  if (!auth) {
+    const baseUrl = getPublicBaseUrl(req);
+    res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`);
+    return res.status(401).send('Unauthorized');
+  }
+  const accept = String(req.headers.accept || '');
+  if (accept && !accept.includes('text/event-stream') && !accept.includes('*/*')) {
+    return res.status(200).json({
+      name: 'termitron-mcp',
+      version: '1.0.0',
+      protocolVersion: '2025-03-26',
+      status: 'ok',
+    });
+  }
   const sid = crypto.randomBytes(12).toString('hex');
   res.set({
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache, no-transform',
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-store, no-transform',
     Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+    'X-LiteSpeed-Cache-Control': 'no-cache, no-store',
+    'Content-Encoding': 'identity',
   });
   res.flushHeaders?.();
-  const base = req.params?.token ? `/mcp/${encodeURIComponent(req.params.token)}` : '/mcp';
-  res.write(`event: endpoint\ndata: ${base}?sessionId=${sid}\n\n`);
+  const origPath = (req.originalUrl || req.url || '').split('?')[0];
+  const mcpIdx = origPath.indexOf('/mcp');
+  const prefix = BASE_PATH || (mcpIdx > 0 ? origPath.slice(0, mcpIdx) : '');
+  const base = req.params?.token ? `${prefix}/mcp/${encodeURIComponent(req.params.token)}` : `${prefix}/mcp`;
+  res.write(`: ${' '.repeat(2048)}\n\nevent: endpoint\ndata: ${base}?sessionId=${sid}\n\n`);
   const hb = setInterval(() => {
     try { res.write(': ping\n\n'); } catch {}
-  }, 20000);
+  }, 15000);
   store.recordMcpActivity(auth.rawToken, req.ip || '', req.headers['user-agent'] || '');
   mcpSseSessions.set(sid, { userId: auth.userId, token: auth.rawToken, res, hb, connectedAt: Date.now() });
   req.on('close', () => {
     clearInterval(hb);
     mcpSseSessions.delete(sid);
   });
+});
+
+app.delete(['/mcp', '/mcp/:token', '/mcp/:token/sse'], (req, res) => {
+  const auth = resolveMcpAuth(req);
+  if (!auth) return res.status(401).end();
+  const sid = String(req.headers['mcp-session-id'] || req.query.sessionId || '');
+  if (sid) mcp.clearSessionDedup?.(sid);
+  if (sid && mcpSseSessions.has(sid)) {
+    const s = mcpSseSessions.get(sid);
+    if (s.userId === auth.userId) {
+      clearInterval(s.hb);
+      try { s.res.end(); } catch {}
+      mcpSseSessions.delete(sid);
+    }
+  }
+  res.status(204).end();
 });
 
 const activeClientSessions = new Map();
@@ -312,6 +661,7 @@ function syncShareStateForUsers(ownerId, targetId) {
           shares_in: store.listPendingInvitesForTarget(ownerId),
           shares_accepted: store.listAcceptedSharesForTarget(ownerId),
         });
+        cw.send({ type: 'hosts_update', hosts: buildClientHosts(ownerId) });
       } catch {}
     }
     if (cw.userId === targetId) {
@@ -349,18 +699,29 @@ function getMcpActiveSessions(uid) {
   return out;
 }
 
-app.post(['/mcp', '/mcp/:token'], async (req, res) => {
+app.post(['/mcp', '/mcp/:token', '/mcp/:token/sse'], express.text({ type: '*/*', limit: '1mb' }), async (req, res) => {
   const auth = resolveMcpAuth(req);
-  if (!auth) return res.status(401).json({ jsonrpc: '2.0', id: req.body?.id ?? null, error: { code: -32001, message: 'Unauthorized' } });
+  if (!auth) {
+    const baseUrl = getPublicBaseUrl(req);
+    res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`);
+    return res.status(401).json({ jsonrpc: '2.0', id: req.body?.id ?? null, error: { code: -32001, message: 'Unauthorized' } });
+  }
+  let body = req.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch { body = null; }
+  }
   const sid = String(req.query.sessionId || '');
   const sse = sid ? mcpSseSessions.get(sid) : null;
   if (sse && sse.userId !== auth.userId) return res.status(403).end();
   store.recordMcpActivity(auth.rawToken, req.ip || '', req.headers['user-agent'] || '');
   const callId = crypto.randomBytes(6).toString('hex');
   mcpActiveCalls.set(callId, { userId: auth.userId, token: auth.rawToken, startedAt: Date.now() });
+  const reqMethod = Array.isArray(body) ? body.find((x) => x?.method === 'initialize')?.method : body?.method;
+  const mcpSid = String(req.headers['mcp-session-id'] || sid || '') || (reqMethod === 'initialize' ? crypto.randomBytes(12).toString('hex') : '');
   let resp;
   try {
-    resp = await mcp.handleRpc(auth.userId, req.body, getMcpActiveSessions, onMcpShareChange);
+    const mcpPerms = store.getMcpTokenPermissions(auth.rawToken);
+    resp = await mcp.handleRpc(auth.userId, body, getMcpActiveSessions, onMcpShareChange, mcpPerms, mcpSid);
   } finally {
     mcpActiveCalls.delete(callId);
   }
@@ -370,7 +731,8 @@ app.post(['/mcp', '/mcp/:token'], async (req, res) => {
     }
     return res.status(202).end();
   }
-  if (!resp) return res.status(204).end();
+  if (mcpSid) res.setHeader('Mcp-Session-Id', mcpSid);
+  if (!resp) return res.status(202).end();
   res.json(resp);
 });
 
@@ -401,12 +763,13 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-app.get('/admin', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
-});
-
 app.get(/^\/[^/]+\/?$/, (req, res, next) => {
-  if (req.path === '/api' || req.path === '/mcp' || req.path === '/admin' || req.path.includes('.')) return next();
+  const cleanPath = req.path.replace(/\/+$/, '') || '/';
+  const adminPath = store.getSetup().adminPath || '/admin';
+  if (cleanPath === adminPath) {
+    return res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+  }
+  if (cleanPath === '/api' || cleanPath === '/mcp' || cleanPath.includes('.')) return next();
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
@@ -458,8 +821,14 @@ app.get('/api/admin/overview', requireAdmin, (req, res) => {
     wsClients: wss.clients.size,
     activeSessions,
     traffic: { totalRx: trafficStats.totalRx, totalTx: trafficStats.totalTx },
+    registrationEnabled: store.getGlobalPolicy().registrationEnabled !== false,
     vpn: { ...vpnMgr.getAdminStatus(), ...store.getGlobalPolicy() },
   });
+});
+
+app.post('/api/admin/registration/policy', requireAdmin, (req, res) => {
+  const policy = store.saveGlobalPolicy({ registrationEnabled: !!req.body?.registrationEnabled });
+  res.json({ ok: true, registrationEnabled: policy.registrationEnabled !== false });
 });
 
 app.post('/api/admin/vpn/policy', requireAdmin, (req, res) => {
@@ -483,6 +852,7 @@ app.post('/api/admin/vpn/delete', requireAdmin, (req, res) => {
 
 function closeAllActiveSessions(reason) {
   let count = 0;
+  try { mcp.closeAllConns?.(); } catch {}
   for (const [key, sess] of activeClientSessions.entries()) {
     try { sess.primeStream?.close(); } catch {}
     try { sess.conn?.end(); } catch {}
@@ -547,6 +917,7 @@ app.post('/api/admin/users/create', requireAdmin, (req, res) => {
 
 function evictUserEverywhere(uid) {
   if (!uid || uid === 'default') return;
+  try { mcp.closeUserConns?.(uid); } catch {}
   for (const [tok, rec] of sessionTokens.entries()) {
     if (rec.userId === uid) sessionTokens.delete(tok);
   }
@@ -595,14 +966,30 @@ function evictUserEverywhere(uid) {
 
 app.post('/api/admin/users/toggle', requireAdmin, (req, res) => {
   const uid = String(req.body?.userId || '');
+  if (!store.isValidUserId(uid) || uid === 'default') {
+    return res.status(400).json({ ok: false, error: 'Invalid user identifier' });
+  }
   const disabled = !!req.body?.disabled;
   store.setUserDisabled(uid, disabled);
   if (disabled) evictUserEverywhere(uid);
   res.json({ ok: true });
 });
 
+app.post('/api/admin/users/note', requireAdmin, (req, res) => {
+  const uid = String(req.body?.userId || '');
+  if (!store.isValidUserId(uid)) {
+    return res.status(400).json({ ok: false, error: 'Invalid user identifier' });
+  }
+  const note = String(req.body?.note || '');
+  store.setUserNote(uid, note);
+  res.json({ ok: true });
+});
+
 app.post('/api/admin/users/delete', requireAdmin, (req, res) => {
   const uid = String(req.body?.userId || '');
+  if (!store.isValidUserId(uid) || uid === 'default') {
+    return res.status(400).json({ ok: false, error: 'Invalid user identifier' });
+  }
   evictUserEverywhere(uid);
   store.deleteUser(uid);
   res.json({ ok: true });
@@ -637,6 +1024,9 @@ app.get('/api/admin/servers', requireAdmin, (req, res) => {
 app.post('/api/admin/servers/delete', requireAdmin, (req, res) => {
   const uid = String(req.body?.userId || 'default');
   const hid = String(req.body?.hostId || '');
+  if (!store.isValidUserId(uid) || !isSafeId(hid)) {
+    return res.status(400).json({ ok: false, error: 'Invalid identifier' });
+  }
   const us = store.forUser(uid);
   const hosts = us.loadHosts().filter((h) => h.id !== hid);
   us.saveHosts(hosts);
@@ -754,15 +1144,15 @@ app.get('/download/:id/:name', async (req, res) => {
   if (item.sudo) {
     try {
       const r = await sudoExec(item.conn, item.sudoPw, `cat -- ${dockerMgr.quote(item.path)}`);
-      if (r.code !== 0) return res.status(500).send(r.err || 'Okuma hatası');
+      if (r.code !== 0) return res.status(500).type('text/plain').send(r.err || 'Okuma hatası');
       return res.send(r.out);
     } catch (e) {
-      return res.status(500).send(String(e));
+      return res.status(500).type('text/plain').send(e?.message || 'Read error');
     }
   }
   const rs = item.sftp.createReadStream(item.path);
   rs.on('error', (e) => {
-    if (!res.headersSent) res.status(500).send(String(e));
+    if (!res.headersSent) res.status(500).type('text/plain').send(e?.message || 'Read error');
   });
   rs.pipe(res);
 });
@@ -777,37 +1167,39 @@ const MEDIA_MIME = {
 
 app.get('/api/media', async (req, res) => {
   const ip = req.ip || req.socket?.remoteAddress || 'unknown';
-  if (!checkAuthRate(ip)) return res.status(429).send('Too many requests');
+  if (!checkAuthRate(ip)) return res.status(429).type('text/plain').send('Too many requests');
   const auth = authenticateToken(req.query.token);
   if (!auth) {
     recordAuthFailure(ip);
-    return res.status(401).send('Unauthorized');
+    return res.status(401).type('text/plain').send('Unauthorized');
   }
   const sess = activeClientSessions.get(`${req.query.clientId || ''}:${req.query.sid || ''}`);
   const filePath = String(req.query.path || '');
-  if (!sess || sess.userId !== auth.userId || !filePath) return res.status(404).send('Not found');
+  if (!sess || sess.userId !== auth.userId || !filePath) return res.status(404).type('text/plain').send('Not found');
+  let liveShare = null;
   if (sess.shared) {
-    const live = store.resolveSharedHost(auth.userId, sess.shared.hostId, sess.shared.ownerId);
-    if (!live || !live.permissions.files_read) return res.status(403).send('Forbidden');
+    liveShare = store.resolveSharedHost(auth.userId, sess.shared.hostId, sess.shared.ownerId);
+    if (!liveShare || !liveShare.permissions.files_read) return res.status(403).type('text/plain').send('Forbidden');
   }
   const ext = path.extname(filePath).toLowerCase();
   const mime = MEDIA_MIME[ext] || 'application/octet-stream';
   if (ext === '.svg') res.setHeader('Content-Security-Policy', 'sandbox');
 
   if (sess.sudo) {
+    if (sess.shared && !liveShare?.permissions?.sudo) return res.status(403).type('text/plain').send('Forbidden');
     try {
       const r = await sudoExec(sess.conn, sess.sudoPw, `cat -- ${dockerMgr.quote(filePath)}`);
-      if (r.code !== 0) return res.status(500).send(r.err || 'Okuma hatası');
+      if (r.code !== 0) return res.status(500).type('text/plain').send(r.err || 'Okuma hatası');
       res.set({ 'Content-Type': mime, 'Cache-Control': 'no-store' });
       return res.send(r.out);
     } catch (e) {
-      return res.status(500).send(String(e));
+      return res.status(500).type('text/plain').send(e?.message || 'Read error');
     }
   }
 
-  if (!sess.sftp) return res.status(503).send('SFTP hazır değil');
+  if (!sess.sftp) return res.status(503).type('text/plain').send('SFTP hazır değil');
   sess.sftp.stat(filePath, (err, st) => {
-    if (err || !st) return res.status(404).send(err?.message || 'Dosya bulunamadı');
+    if (err || !st) return res.status(404).type('text/plain').send(err?.message || 'Dosya bulunamadı');
     const total = st.size || 0;
     const range = req.headers.range;
     if (range && total > 0) {
@@ -834,9 +1226,15 @@ app.get('/api/media', async (req, res) => {
       'Cache-Control': 'no-store',
     });
     const rs = sess.sftp.createReadStream(filePath);
-    rs.on('error', (e) => { if (!res.headersSent) res.status(500).send(String(e)); });
+    rs.on('error', (e) => { if (!res.headersSent) res.status(500).type('text/plain').send(e?.message || 'Read error'); });
     rs.pipe(res);
   });
+});
+
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const status = err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600 ? err.status : 500;
+  res.status(status).json({ ok: false, error: status === 400 ? 'Bad request' : 'Internal server error' });
 });
 
 const server = http.createServer(app);
@@ -850,10 +1248,15 @@ server.on('upgrade', (req, socket, head) => {
     return socket.destroy();
   }
   const origin = req.headers.origin;
-  if (origin && req.headers.host) {
+  const expectedHosts = new Set(
+    [req.headers.host, req.headers['x-forwarded-host']]
+      .filter(Boolean)
+      .map((h) => String(h).split(',')[0].trim().toLowerCase())
+  );
+  if (origin && expectedHosts.size > 0) {
     try {
-      const oHost = new URL(origin).host;
-      if (oHost !== req.headers.host) {
+      const oHost = new URL(origin).host.toLowerCase();
+      if (!expectedHosts.has(oHost)) {
         socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
         return socket.destroy();
       }
@@ -862,8 +1265,14 @@ server.on('upgrade', (req, socket, head) => {
       return socket.destroy();
     }
   }
-  const rawUrl = stripBasePath(req.url || '/');
-  const url = new URL(rawUrl, `http://${req.headers.host || 'localhost'}`);
+  let url;
+  try {
+    const rawUrl = stripBasePath(req.url || '/');
+    url = new URL(rawUrl, 'http://localhost');
+  } catch {
+    socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+    return socket.destroy();
+  }
   const auth = authenticateToken(url.searchParams.get('token'));
   if (!auth) {
     recordAuthFailure(ip);
@@ -1050,7 +1459,24 @@ wss.on('connection', (ws, req, userId = 'default') => {
       (Number(profile?.port) || 22) === (Number(savedHost.port) || 22) &&
       (profile?.user || 'root') === (savedHost.user || 'root')
     );
-    const effectiveProfile = matchesSaved ? { ...savedHost, ...profile, host: savedHost.host, port: savedHost.port, user: savedHost.user } : profile;
+    const effectiveProfile = matchesSaved
+      ? {
+          ...profile,
+          ...savedHost,
+          host: savedHost.host,
+          port: savedHost.port,
+          user: savedHost.user,
+          auth: savedHost.auth,
+          jump_id: savedHost.jump_id,
+          proxy_mode: savedHost.proxy_mode,
+          proxy_host: savedHost.proxy_host,
+          proxy_port: savedHost.proxy_port,
+          proxy_user: savedHost.proxy_user,
+          startup: savedHost.startup,
+          env: savedHost.env,
+          options: savedHost.options,
+        }
+      : profile;
     const hostStr = String(effectiveProfile?.host || '').trim();
     const portNum = Number(effectiveProfile?.port) || 22;
     const safeTargetIp = await vpnMgr.resolveAndValidateTarget(hostStr, portNum);
@@ -1084,7 +1510,11 @@ wss.on('connection', (ws, req, userId = 'default') => {
       if (jumpHost) {
         const jConn = await connectSsh(jumpHost, depth + 1, targetUid, targetStore, sharedMeta);
         sockStream = await new Promise((res, rej) => {
-          jConn.forwardOut('127.0.0.1', 0, safeTargetIp, portNum, (err, s) => (err ? rej(err) : res(s)));
+          jConn.forwardOut('127.0.0.1', 0, safeTargetIp, portNum, (err, s) => {
+            if (err) { try { jConn.end(); } catch {} return rej(err); }
+            s.on('close', () => { try { jConn.end(); } catch {} });
+            res(s);
+          });
         });
       }
     } else {
@@ -1140,7 +1570,9 @@ wss.on('connection', (ws, req, userId = 'default') => {
         port: portNum,
         username: effectiveProfile.user || 'root',
         tryKeyboard: true,
+        readyTimeout: 25000,
         keepaliveInterval: (Number(effectiveProfile.keepalive) || 30) * 1000,
+        keepaliveCountMax: 3,
         hostVerifier: (keyBuf, cb) => {
           const b64 = keyBuf.toString('base64');
           const fp = targetStore.fingerprintB64(b64);
@@ -1328,6 +1760,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
         case 'share_leave': {
           const removed = store.leaveShare(userId, msg.id);
           if (removed) {
+            try { mcp.closeSharedConns?.(removed.ownerId, userId); } catch {}
             for (const cw of clientWorkspaces.values()) {
               if (cw.userId === userId) {
                 closeSharedSessionsFor(cw, removed.ownerId);
@@ -1354,6 +1787,7 @@ wss.on('connection', (ws, req, userId = 'default') => {
             shares_accepted: store.listAcceptedSharesForTarget(userId),
           });
           if (removed) {
+            try { mcp.closeSharedConns?.(userId, removed.targetId); } catch {}
             toast('Share revoked.', 'ok');
             for (const cw of clientWorkspaces.values()) {
               if (cw.userId === removed.targetId) {
@@ -1398,7 +1832,14 @@ wss.on('connection', (ws, req, userId = 'default') => {
           send({ type: 'mcp_links', mcp_links: buildUserMcpLinks(userId) });
           break;
         case 'mcp_create':
-          store.createMcpToken(userId, msg.label || 'MCP Link');
+          if (store.listMcpTokens(userId).length >= 25) {
+            return toast('Maximum MCP links reached (25).', 'err');
+          }
+          store.createMcpToken(userId, msg.label || 'MCP Link', msg.permissions || null);
+          send({ type: 'mcp_links', mcp_links: buildUserMcpLinks(userId) });
+          break;
+        case 'mcp_update_perms':
+          store.updateMcpTokenPermissions(userId, msg.id, msg.permissions || {});
           send({ type: 'mcp_links', mcp_links: buildUserMcpLinks(userId) });
           break;
         case 'mcp_disconnect':
@@ -1414,8 +1855,9 @@ wss.on('connection', (ws, req, userId = 'default') => {
           break;
         case 'save_hosts': {
           const prevHosts = new Map(uStore.loadHosts().map((h) => [h.id, h]));
-          const nextOwn = (msg.hosts || [])
-            .filter((h) => !h.shared)
+          const nextOwn = (Array.isArray(msg.hosts) ? msg.hosts : [])
+            .slice(0, 500)
+            .filter((h) => h && typeof h === 'object' && !h.shared && isSafeId(h.id))
             .map(({ had_pw, had_key, had_passphrase, had_proxy_pass, password, passphrase, proxy_pass, shared, shareId, ownerId, permissions, rawHostId, ...rest }) => rest);
           uStore.saveHosts(nextOwn);
           const s = uStore.loadSecrets();
@@ -1445,12 +1887,31 @@ wss.on('connection', (ws, req, userId = 'default') => {
           }
           break;
         }
-        case 'save_snippets':
-          uStore.saveSnippets(msg.snippets || []);
+        case 'save_snippets': {
+          const cleanSnips = (Array.isArray(msg.snippets) ? msg.snippets : [])
+            .slice(0, 500)
+            .filter((x) => x && typeof x === 'object')
+            .map((x) => ({
+              id: isSafeId(x.id) ? x.id : crypto.randomBytes(6).toString('hex'),
+              name: String(x.name || '').slice(0, 120),
+              command: String(x.command || '').slice(0, 8192),
+            }));
+          uStore.saveSnippets(cleanSnips);
           break;
-        case 'save_settings':
-          uStore.saveSettings(msg.settings || {});
+        }
+        case 'save_settings': {
+          const rawS = msg.settings && typeof msg.settings === 'object' ? msg.settings : {};
+          const curS = uStore.loadSettings();
+          const cleanS = {
+            ...curS,
+            ...(rawS.font_size !== undefined ? { font_size: Math.max(8, Math.min(32, Number(rawS.font_size) || 14)) } : {}),
+            ...(rawS.scrollback !== undefined ? { scrollback: Math.max(100, Math.min(50000, Number(rawS.scrollback) || 5000)) } : {}),
+            ...(rawS.keepalive !== undefined ? { keepalive: Math.max(0, Math.min(600, Number(rawS.keepalive) || 30)) } : {}),
+            ...(typeof rawS.term_theme === 'string' ? { term_theme: rawS.term_theme.slice(0, 40) } : {}),
+          };
+          uStore.saveSettings(cleanS);
           break;
+        }
         case 'remove_known_host': {
           const kh = uStore.loadKnownHosts().filter((e) => e.host !== msg.host);
           uStore.saveKnownHosts(kh);
@@ -1673,6 +2134,10 @@ wss.on('connection', (ws, req, userId = 'default') => {
           const s = sessions.get(msg.sid);
           if (!s?.conn || (!s.sftp && !s.sudo)) return;
           if (!requirePerm(s, 'files_write')) return;
+          const delPath = String(msg.path || '').trim();
+          if (!delPath || delPath === '/' || delPath === '/*') {
+            return toast('Kök dizin silinemez.', 'err');
+          }
           if (s.sudo) {
             const r = await sudoExec(s.conn, s.sudoPw, `rm -rf -- ${dockerMgr.quote(msg.path)}`);
             if (r.code !== 0) toast(r.err || 'Silinemedi.', 'err');
@@ -1886,15 +2351,18 @@ wss.on('connection', (ws, req, userId = 'default') => {
         }
         case 'term_input': {
           const t = terms.get(msg.termId);
-          if (!t) break;
+          if (!t || typeof msg.data !== 'string' || msg.data.length > 65536) break;
           const s = sessions.get(t.sid);
           if (s?.shared && !requirePerm(s, 'terminal')) break;
           t.write(msg.data);
           break;
         }
-        case 'term_resize':
-          terms.get(msg.termId)?.resize(msg.rows, msg.cols);
+        case 'term_resize': {
+          const r = Math.max(1, Math.min(500, Math.floor(Number(msg.rows) || 24)));
+          const c = Math.max(1, Math.min(500, Math.floor(Number(msg.cols) || 80)));
+          terms.get(msg.termId)?.resize(r, c);
           break;
+        }
         case 'term_close':
           terms.get(msg.termId)?.close();
           terms.delete(msg.termId);
@@ -2011,6 +2479,7 @@ setInterval(() => {
   const now = Date.now();
   for (const [t, rec] of sessionTokens.entries()) if (now > rec.exp) sessionTokens.delete(t);
   for (const [t, exp] of adminTokens.entries()) if (now > exp) adminTokens.delete(t);
+  for (const [c, rec] of oauthCodes.entries()) if (now > rec.exp) oauthCodes.delete(c);
   for (const [ip, rec] of regLimits.entries()) if (now > rec.resetAt) regLimits.delete(ip);
   for (const [ip, rec] of authFailures.entries()) if (now > rec.resetAt) authFailures.delete(ip);
 }, 10 * 60 * 1000).unref();
@@ -2031,20 +2500,5 @@ setInterval(() => {
 }, 25000).unref();
 
 server.listen(BIND_PORT, BIND_HOST, () => {
-  const lines = [
-    `Termitron (Node.js) started: http://${BIND_HOST}:${BIND_PORT}`,
-    `Data directory: ${store.DATA_DIR}`,
-    `Admin Panel: http://${BIND_HOST}:${BIND_PORT}/admin (Admin Key: ${ADMIN_KEY})`,
-  ];
-  if (NO_AUTH) {
-    lines.push('WARNING: Authentication is disabled (--no-auth).');
-  } else {
-    lines.push(`Access password / token: ${SECRET}`);
-    lines.push(`Quick login URL: http://${BIND_HOST}:${BIND_PORT}/?token=${SECRET}`);
-  }
-  for (const l of lines) console.log(l);
-  try {
-    fs.mkdirSync(store.DATA_DIR, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(path.join(store.DATA_DIR, 'startup.log'), lines.join('\n') + '\n', { encoding: 'utf8', mode: 0o600 });
-  } catch {}
+  console.log(`Termitron (Node.js) started: http://${BIND_HOST}:${BIND_PORT}`);
 });

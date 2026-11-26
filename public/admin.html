@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Termitron Admin Panel</title>
-  <link rel="stylesheet" href="style.css?v=8" />
+  <link rel="stylesheet" href="style.css?v=10" />
   <style>
     body { overflow: auto; }
     .adm-shell { max-width: 1180px; margin: 0 auto; padding: 20px; }
@@ -16,7 +16,7 @@
     .adm-card { background: var(--bg-sidebar); border: 1px solid var(--border-strong); border-radius: 6px; padding: 14px; }
     .adm-card-lbl { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
     .adm-card-val { font-size: 22px; font-weight: 600; color: var(--ink-bright); margin-top: 6px; }
-    .adm-panel { background: var(--bg-sidebar); border: 1px solid var(--border-strong); border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+    .adm-panel { background: var(--bg-sidebar); border: 1px solid var(--border-strong); border-radius: 6px; padding: 16px; margin-bottom: 16px; overflow-x: auto; }
     .adm-panel h3 { margin: 0 0 12px; font-size: 14.5px; color: var(--ink-bright); display: flex; align-items: center; justify-content: space-between; }
     .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; background: #262626; color: var(--muted); }
     .badge.ok { background: rgba(63,185,80,0.16); color: var(--success); }
@@ -64,7 +64,22 @@
     <div id="adm-content"></div>
   </div>
 
+  <div id="adm-modal-backdrop" class="modal-backdrop hidden">
+    <div id="adm-modal-box" class="modal-box" style="width:560px;max-width:94vw;"></div>
+  </div>
+  <div id="auth-loader" class="auth-loader-overlay hidden">
+    <div class="auth-loader-card">
+      <div class="auth-loader-spinner">
+        <div class="auth-loader-ring"></div>
+        <div class="auth-loader-ico">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        </div>
+      </div>
+      <div id="auth-loader-text" class="auth-loader-text">Loading...</div>
+      <div class="auth-loader-bar"></div>
+    </div>
+  </div>
   <div id="toasts" class="toasts"></div>
-  <script src="admin.js?v=8"></script>
+  <script src="admin.js?v=15"></script>
 </body>
 </html>

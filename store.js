@@ -211,7 +211,22 @@ function listUsers() {
     userId: rec.userId,
     createdAt: rec.createdAt || 0,
     disabled: !!rec.disabled,
+    note: rec.note || '',
   }));
+}
+
+function setUserNote(userId, note) {
+  const users = loadJson('users.json', {});
+  let changed = false;
+  const cleanNote = String(note || '').trim().slice(0, 200);
+  for (const k of Object.keys(users)) {
+    if (users[k].userId === userId) {
+      users[k].note = cleanNote;
+      changed = true;
+    }
+  }
+  if (changed) saveJson('users.json', users, 0o600);
+  return changed;
 }
 
 function setUserDisabled(userId, disabled) {
@@ -228,6 +243,7 @@ function setUserDisabled(userId, disabled) {
 }
 
 function deleteUser(userId) {
+  if (!isValidUserId(userId) || userId === 'default') return false;
   const users = loadJson('users.json', {});
   let changed = false;
   for (const k of Object.keys(users)) {
@@ -237,9 +253,8 @@ function deleteUser(userId) {
     }
   }
   if (changed) saveJson('users.json', users, 0o600);
-  const safeId = String(userId || '').replace(/[^a-zA-Z0-9_-]/g, '');
-  if (safeId && safeId !== 'default') {
-    const dir = path.join(DATA_DIR, 'users', safeId);
+  const dir = path.resolve(DATA_DIR, 'users', userId);
+  if (dir.startsWith(path.resolve(DATA_DIR, 'users') + path.sep)) {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
   }
   const shares = loadJson('shares.json', []);
@@ -297,13 +312,58 @@ function forUser(userId) {
 }
 
 function getGlobalPolicy() {
-  return { vpnEnabled: true, allowWithoutVpn: false, ...loadJson('policy.json', {}) };
+  return { vpnEnabled: false, allowWithoutVpn: true, registrationEnabled: true, ...loadJson('policy.json', {}) };
 }
 
 function saveGlobalPolicy(patch) {
   const next = { ...getGlobalPolicy(), ...(patch || {}) };
   saveJson('policy.json', next, 0o600);
   return next;
+}
+
+function normalizeAdminPath(p) {
+  let s = '/' + String(p || 'admin').trim().replace(/^\/+|\/+$/g, '').replace(/[^a-zA-Z0-9_-]/g, '');
+  if (s.length < 2) s = '/admin';
+  if (/^\/(?:api|ws|ws-vnc|mcp|download|novnc|oauth|well-known)$/i.test(s)) s = '/admin';
+  return s;
+}
+
+function getSetup() {
+  return { setupDone: false, adminPath: '/admin', ...loadJson('setup.json', {}) };
+}
+
+function saveSetup(patch) {
+  const cur = getSetup();
+  const next = {
+    ...cur,
+    ...(patch || {}),
+    adminPath: normalizeAdminPath(patch?.adminPath !== undefined ? patch.adminPath : cur.adminPath),
+  };
+  saveJson('setup.json', next, 0o600);
+  return next;
+}
+
+const DEFAULT_MCP_PERMISSIONS = {
+  connect: true,
+  exec: true,
+  hosts_add: true,
+  hosts_edit: true,
+  hosts_delete: true,
+  files_read: true,
+  files_write: true,
+  files_delete: true,
+  docker: true,
+  share: true,
+};
+
+function normalizeMcpPermissions(perms) {
+  const p = perms && typeof perms === 'object' ? perms : {};
+  const out = {};
+  for (const k of Object.keys(DEFAULT_MCP_PERMISSIONS)) {
+    out[k] = p[k] !== undefined ? !!p[k] : DEFAULT_MCP_PERMISSIONS[k];
+  }
+  if (out.files_write || out.files_delete) out.files_read = true;
+  return out;
 }
 
 function listMcpTokens(userId) {
@@ -321,6 +381,7 @@ function listMcpTokens(userId) {
         lastIp: rec.lastIp || '',
         lastClient: rec.lastClient || '',
         calls: rec.calls || 0,
+        permissions: normalizeMcpPermissions(rec.permissions),
       });
     }
   }
@@ -331,16 +392,44 @@ function listMcpTokens(userId) {
   return out.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
 }
 
-function createMcpToken(userId, label = 'MCP Link') {
+function createMcpToken(userId, label = 'MCP Link', permissions = null) {
   const uid = userId || 'default';
   const map = loadJson('mcp_tokens.json', {});
   const tok = 'mcp_' + crypto.randomBytes(16).toString('hex');
   const id = crypto.randomBytes(6).toString('hex');
   const cleanLabel = String(label || 'MCP Link').trim().slice(0, 40) || 'MCP Link';
-  const rec = { id, userId: uid, label: cleanLabel, createdAt: Date.now(), lastUsedAt: 0, lastIp: '', lastClient: '', calls: 0 };
+  const perms = normalizeMcpPermissions(permissions);
+  const rec = { id, userId: uid, label: cleanLabel, createdAt: Date.now(), lastUsedAt: 0, lastIp: '', lastClient: '', calls: 0, permissions: perms };
   map[tok] = rec;
   saveJson('mcp_tokens.json', map, 0o600);
   return { ...rec, token: tok };
+}
+
+function updateMcpTokenPermissions(userId, idOrToken, permissions) {
+  const uid = userId || 'default';
+  const map = loadJson('mcp_tokens.json', {});
+  let updated = null;
+  for (const [tok, rec] of Object.entries(map)) {
+    if (rec.userId === uid && (safeStrEqual(tok, idOrToken) || rec.id === idOrToken || tok.slice(0, 12) === idOrToken)) {
+      rec.permissions = normalizeMcpPermissions(permissions);
+      updated = { ...rec, token: tok };
+    }
+  }
+  if (updated) saveJson('mcp_tokens.json', map, 0o600);
+  return updated;
+}
+
+function getMcpTokenPermissions(tok) {
+  if (!tok || typeof tok !== 'string' || !tok.startsWith('mcp_')) {
+    return normalizeMcpPermissions(DEFAULT_MCP_PERMISSIONS);
+  }
+  const map = loadJson('mcp_tokens.json', {});
+  for (const [k, rec] of Object.entries(map)) {
+    if (safeStrEqual(k, tok)) {
+      return normalizeMcpPermissions(rec.permissions);
+    }
+  }
+  return normalizeMcpPermissions(DEFAULT_MCP_PERMISSIONS);
 }
 
 function deleteMcpToken(userId, idOrToken) {
@@ -613,6 +702,7 @@ function listSharedHostsForUser(targetUserId) {
 
 module.exports = {
   DATA_DIR,
+  isValidUserId,
   registerUser,
   findUserByKey,
   userExists,
@@ -620,12 +710,20 @@ module.exports = {
   setAdminKey,
   listUsers,
   setUserDisabled,
+  setUserNote,
   deleteUser,
   getGlobalPolicy,
   saveGlobalPolicy,
+  getSetup,
+  saveSetup,
+  normalizeAdminPath,
   listMcpTokens,
   createMcpToken,
   deleteMcpToken,
+  updateMcpTokenPermissions,
+  getMcpTokenPermissions,
+  DEFAULT_MCP_PERMISSIONS,
+  normalizeMcpPermissions,
   recordMcpActivity,
   getOrCreateMcpToken,
   rotateMcpToken,

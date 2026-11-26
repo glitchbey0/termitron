@@ -25,6 +25,7 @@ const state = {
   clientId: '',
   ws: null,
   view: 'hosts',
+  touchMods: { ctrl: false, alt: false },
   hosts: [],
   sharesOut: [],
   sharesIn: [],
@@ -69,6 +70,13 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const BASE_PATH = location.pathname.replace(/\/(index\.html)?$/, '').replace(/\/$/, '');
 const apiUrl = (p) => `${BASE_PATH}${p.startsWith('/') ? p : '/' + p}`;
+function showAuthLoader(text) {
+  if ($('auth-loader-text')) $('auth-loader-text').textContent = text || 'Loading...';
+  $('auth-loader')?.classList.remove('hidden');
+}
+function hideAuthLoader() {
+  $('auth-loader')?.classList.add('hidden');
+}
 
 function b64ToBytes(b64) {
   const bin = atob(b64);
@@ -107,17 +115,55 @@ async function boot() {
   };
   if ($('btn-lang')) $('btn-lang').onclick = toggleLang;
   if ($('landing-lang')) $('landing-lang').onclick = toggleLang;
-  const params = new URLSearchParams(location.search);
-  const urlTok = params.get('token');
-  if (urlTok) {
-    sessionStorage.setItem('trm_web_token', urlTok);
-    history.replaceState(null, '', location.pathname);
-  }
   state.token = sessionStorage.getItem('trm_web_token') || '';
 
-  const st = await fetch(apiUrl('/api/auth/status')).then((r) => r.json()).catch(() => ({ auth_required: true }));
+  const st = await fetch(apiUrl('/api/auth/status')).then((r) => r.json()).catch(() => ({ auth_required: true, registration_enabled: true }));
+  if (st.setup_required) {
+    await showSetupScreen();
+  }
+  if (st.registration_enabled === false) {
+    $('register-btn')?.classList.add('hidden');
+    document.querySelector('.auth-divider')?.classList.add('hidden');
+  }
   if (!st.auth_required || state.token) connectWs();
   else $('login-screen').classList.remove('hidden');
+}
+
+async function showSetupScreen() {
+  const info = await fetch(apiUrl('/api/setup/info')).then((r) => r.json()).catch(() => null);
+  if (!info || !info.ok) return;
+  return new Promise((resolve) => {
+    showModal(`
+      <h3 style="margin:0 0 8px;">Termitron Initial Setup</h3>
+      <p class="muted" style="font-size:12.5px;margin-bottom:14px;">Save your credentials and choose your Admin Panel path. This screen is only shown once.</p>
+      <label class="field-label">Admin Panel Path (e.g. /adamento)</label>
+      <input id="stp-admin-path" class="mono" value="${esc(info.adminPath || '/admin')}" placeholder="/adamento" />
+      <label class="field-label">Admin Key</label>
+      <input id="stp-admin-key" class="mono" value="${esc(info.adminKey || '')}" />
+      <label class="field-label">Default Access Token</label>
+      <input id="stp-access-tok" class="mono" readonly value="${esc(info.accessToken || '')}" />
+      <div id="stp-err" class="err-text"></div>
+      <div class="modal-actions">
+        <button class="btn primary full" id="stp-save">Complete Setup</button>
+      </div>
+    `);
+    $('stp-save').onclick = async () => {
+      $('stp-err').textContent = '';
+      const adminPath = $('stp-admin-path').value.trim() || '/admin';
+      const adminKey = $('stp-admin-key').value.trim();
+      const res = await fetch(apiUrl('/api/setup'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adminPath, adminKey }),
+      }).then((r) => r.json()).catch(() => ({ ok: false, error: 'Network error' }));
+      if (!res.ok) {
+        $('stp-err').textContent = res.error || 'Setup failed';
+        return;
+      }
+      closeModal();
+      resolve();
+    };
+  });
 }
 
 $('login-btn').onclick = submitLogin;
@@ -140,16 +186,21 @@ $('register-btn').onclick = async () => {
     setTimeout(() => { $('reg-copy-btn').textContent = t('reg_copy'); }, 1500);
   };
   $('reg-enter-btn').onclick = () => {
+    showAuthLoader(getLang() === 'tr' ? 'Çalışma alanına giriliyor...' : 'Entering workspace...');
     state.token = res.session_token;
     sessionStorage.setItem('trm_web_token', state.token);
-    $('login-screen').classList.add('hidden');
-    connectWs();
+    setTimeout(() => {
+      $('login-screen').classList.add('hidden');
+      connectWs();
+      hideAuthLoader();
+    }, 450);
   };
 };
 
 async function submitLogin() {
   const token = $('login-token').value.trim();
   $('login-err').textContent = '';
+  showAuthLoader(getLang() === 'tr' ? 'Giriş yapılıyor...' : 'Signing in...');
   const res = await fetch(apiUrl('/api/auth'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -159,9 +210,13 @@ async function submitLogin() {
   if (res.ok) {
     state.token = res.session_token;
     sessionStorage.setItem('trm_web_token', state.token);
-    $('login-screen').classList.add('hidden');
-    connectWs();
+    setTimeout(() => {
+      $('login-screen').classList.add('hidden');
+      connectWs();
+      hideAuthLoader();
+    }, 450);
   } else {
+    hideAuthLoader();
     $('login-err').textContent = res.error || t('login_err_bad');
   }
 }
@@ -180,6 +235,7 @@ function connectWs() {
     $('app').classList.remove('hidden');
     $('status-bar').classList.remove('hidden');
     $('status-right').textContent = t('ws_connected');
+    if (isMobileOrTablet()) setSidebarOpen(true);
     wsSend({ type: 'init', clientId: sessionStorage.getItem('trm_client_id') || '' });
   };
 
@@ -193,6 +249,10 @@ function connectWs() {
       $('app').classList.add('hidden');
       $('status-bar').classList.add('hidden');
       $('login-screen').classList.remove('hidden');
+    } else if (state.ws === ws) {
+      setTimeout(() => {
+        if (!state.ws || state.ws.readyState > 1) connectWs();
+      }, 2000);
     }
   };
 }
@@ -460,7 +520,33 @@ function handleServerMsg(msg) {
   }
 }
 
-$('btn-toggle-sidebar').onclick = () => $('sidebar').classList.toggle('hidden');
+function isMobileOrTablet() {
+  return window.innerWidth <= 900;
+}
+function syncSidebarBackdrop() {
+  const sb = $('sidebar');
+  const bd = $('sidebar-backdrop');
+  if (!sb || !bd) return;
+  const open = !sb.classList.contains('hidden') && isMobileOrTablet();
+  bd.classList.toggle('hidden', !open);
+}
+function setSidebarOpen(open) {
+  const sb = $('sidebar');
+  if (!sb) return;
+  sb.classList.toggle('hidden', !open);
+  syncSidebarBackdrop();
+  setTimeout(() => window.dispatchEvent(new Event('resize')), 30);
+}
+function closeMobileSidebarIfNeeded() {
+  if (isMobileOrTablet()) setSidebarOpen(false);
+}
+
+$('btn-toggle-sidebar').onclick = () => {
+  setSidebarOpen($('sidebar').classList.contains('hidden'));
+};
+if ($('sidebar-backdrop')) {
+  $('sidebar-backdrop').onclick = () => setSidebarOpen(false);
+}
 $('btn-toggle-panel').onclick = () => {
   $('term-panel').classList.toggle('hidden');
   applyLayout();
@@ -474,15 +560,22 @@ $('top-quick-connect').onkeydown = (e) => {
   if (e.key === 'Enter') {
     quickConnect($('top-quick-connect').value);
     $('top-quick-connect').value = '';
+    $('top-quick-connect').blur();
   }
 };
 
 document.querySelectorAll('.act-btn[data-view]').forEach((btn) => {
   btn.onclick = () => {
+    const targetView = btn.dataset.view;
+    const sbOpen = !$('sidebar').classList.contains('hidden');
+    if (state.view === targetView && sbOpen) {
+      setSidebarOpen(false);
+      return;
+    }
     document.querySelectorAll('.act-btn[data-view]').forEach((b) => b.classList.remove('active'));
     btn.classList.add('active');
-    state.view = btn.dataset.view;
-    $('sidebar').classList.remove('hidden');
+    state.view = targetView;
+    setSidebarOpen(true);
     renderSidebar();
   };
 });
@@ -589,12 +682,16 @@ function renderSidebar() {
               <div class="list-item-sub mono">${subText}</div>
             </div>
           </div>
-          ${canEdit ? `<div class="list-item-acts">
-            <button class="icon-btn xs act-edit" title="${t('tt_edit')}">${ICO.edit}</button>
-            ${h.shared ? '' : `<button class="icon-btn xs act-del" title="${t('tt_delete')}">${ICO.trash}</button>`}
-          </div>` : ''}
+          <div class="list-item-acts">
+            <button class="icon-btn xs act-conn" title="${t('connect')}">${ICO.term}</button>
+            ${canEdit ? `<button class="icon-btn xs act-edit" title="${t('tt_edit')}">${ICO.edit}</button>` : ''}
+            ${canEdit && !h.shared ? `<button class="icon-btn xs act-del" title="${t('tt_delete')}">${ICO.trash}</button>` : ''}
+          </div>
         `;
         row.onclick = (e) => {
+          if (e.target.closest('.act-conn')) {
+            return startConnect(h.id, h);
+          }
           if (canEdit && e.target.closest('.act-edit')) return openHostModal(h);
           if (!h.shared && e.target.closest('.act-del')) {
             state.hosts = state.hosts.filter((x) => x.id !== h.id);
@@ -602,9 +699,13 @@ function renderSidebar() {
             renderWelcomeRecent();
             return renderSidebar();
           }
+          const wasSelected = state.selectedHostId === h.id;
           state.selectedHostId = h.id;
           list.querySelectorAll('.list-item').forEach((el) => el.classList.remove('selected'));
           row.classList.add('selected');
+          if (wasSelected || isMobileOrTablet() || window.matchMedia?.('(pointer: coarse)').matches) {
+            startConnect(h.id, h);
+          }
         };
         row.ondblclick = (e) => {
           if (e.target.closest('.list-item-acts')) return;
@@ -653,8 +754,10 @@ function renderSidebar() {
           wsSend({ type: 'save_snippets', snippets: state.snippets });
           return renderSidebar();
         }
-        if (state.activeTermId) wsSend({ type: 'term_input', termId: state.activeTermId, data: sn.command + '\n' });
-        else toast('Aktif terminal yok.', 'warn');
+        if (state.activeTermId) {
+          wsSend({ type: 'term_input', termId: state.activeTermId, data: sn.command + '\n' });
+          closeMobileSidebarIfNeeded();
+        } else toast('Aktif terminal yok.', 'warn');
       };
       list.appendChild(c);
     }
@@ -760,7 +863,21 @@ function renderSidebar() {
             <button id="mcp-add-btn" class="btn primary sm">+</button>
           </div>
           <div id="mcp-links-list" style="display:flex;flex-direction:column;gap:8px;">
-            ${(state.mcpLinks || []).map((l) => `
+            ${(state.mcpLinks || []).map((l) => {
+              const p = l.permissions || {};
+              const permItems = [
+                ['connect', curLang === 'tr' ? 'Sunucuya Bağlanma' : 'Connect Server'],
+                ['exec', curLang === 'tr' ? 'Komut Çalıştırma' : 'Run Commands'],
+                ['hosts_add', curLang === 'tr' ? 'Sunucu Ekleme' : 'Add Server'],
+                ['hosts_edit', curLang === 'tr' ? 'Sunucu Düzenleme' : 'Edit Server'],
+                ['hosts_delete', curLang === 'tr' ? 'Sunucu Silme' : 'Delete Server'],
+                ['files_read', curLang === 'tr' ? 'Dosya Okuma' : 'Read Files'],
+                ['files_write', curLang === 'tr' ? 'Dosya Oluştur/Düzenle' : 'Create/Edit Files'],
+                ['files_delete', curLang === 'tr' ? 'Dosya Silme' : 'Delete Files'],
+                ['docker', 'Docker'],
+                ['share', curLang === 'tr' ? 'Paylaşım' : 'Sharing'],
+              ];
+              return `
               <div style="padding:8px;border-radius:4px;background:var(--bg-editor);border:1px solid var(--border-strong);">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
                   <span style="font-size:12px;font-weight:500;color:var(--ink-bright);display:flex;align-items:center;gap:6px;">
@@ -771,24 +888,34 @@ function renderSidebar() {
                 </div>
                 ${l.lastIp ? `<div class="muted mono" style="font-size:10.5px;margin-bottom:4px;">IP: ${esc(l.lastIp)}</div>` : ''}
                 <input class="mono" readonly value="${esc(location.origin + apiUrl('/mcp/' + l.token))}" style="font-size:11px;margin-bottom:6px;" />
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 6px;margin-bottom:8px;padding:6px;background:var(--bg-sidebar);border:1px solid var(--border);border-radius:4px;">
+                  ${permItems.map(([pk, plabel]) => `
+                    <label style="display:flex;align-items:center;gap:5px;font-size:11px;cursor:pointer;user-select:none;">
+                      <input type="checkbox" class="mcp-perm-cb" data-mcp-id="${esc(l.id)}" data-perm="${pk}" ${p[pk] !== false ? 'checked' : ''} style="width:auto;margin:0;" />
+                      <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(plabel)}</span>
+                    </label>
+                  `).join('')}
+                </div>
                 <div style="display:flex;gap:4px;">
                   <button class="btn sm mcp-copy" data-url="${esc(location.origin + apiUrl('/mcp/' + l.token))}" style="flex:1;justify-content:center;">${t('reg_copy')}</button>
                   <button class="btn sm mcp-disc" data-id="${esc(l.id)}" title="Disconnect">Disconnect</button>
                   <button class="btn danger sm mcp-del" data-id="${esc(l.id)}" title="${t('tt_delete')}">${t('tt_delete')}</button>
                 </div>
               </div>
-            `).join('')}
+            `;
+            }).join('')}
           </div>
         </div>
         <button id="set-logout" class="btn danger full" style="margin-top:14px;">${t('sign_out')}</button>
       </div>
     `;
     $('set-logout').onclick = () => {
+      showAuthLoader(getLang() === 'tr' ? 'Çıkış yapılıyor...' : 'Signing out...');
       sessionStorage.removeItem('trm_web_token');
       sessionStorage.removeItem('trm_client_id');
       sessionStorage.removeItem('trm_active_sid');
       sessionStorage.removeItem('trm_active_term');
-      location.reload();
+      setTimeout(() => location.reload(), 450);
     };
     if ($('my-uid-copy')) {
       $('my-uid-copy').onclick = async () => {
@@ -821,6 +948,21 @@ function renderSidebar() {
     });
     document.querySelectorAll('.mcp-del').forEach((b) => {
       b.onclick = () => wsSend({ type: 'mcp_delete', id: b.dataset.id });
+    });
+    document.querySelectorAll('.mcp-perm-cb').forEach((cb) => {
+      cb.onchange = () => {
+        const mcpId = cb.dataset.mcpId;
+        const boxes = document.querySelectorAll(`.mcp-perm-cb[data-mcp-id="${CSS.escape(mcpId)}"]`);
+        const permissions = {};
+        boxes.forEach((x) => { permissions[x.dataset.perm] = x.checked; });
+        if ((permissions.files_write || permissions.files_delete) && cb.dataset.perm !== 'files_read') {
+          permissions.files_read = true;
+        } else if (cb.dataset.perm === 'files_read' && !cb.checked) {
+          permissions.files_write = false;
+          permissions.files_delete = false;
+        }
+        wsSend({ type: 'mcp_update_perms', id: mcpId, permissions });
+      };
     });
     $('set-lang').onchange = () => {
       localStorage.setItem('trm_lang', $('set-lang').value);
@@ -934,6 +1076,7 @@ function mediaUrl(sid, filePath) {
 }
 
 function openMediaTab(sid, filePath, mediaKind) {
+  closeMobileSidebarIfNeeded();
   let idx = state.tabs.findIndex((t) => t.type === 'media' && t.sid === sid && t.path === filePath);
   if (idx === -1) {
     state.tabs.push({
@@ -952,7 +1095,7 @@ function openMediaTab(sid, filePath, mediaKind) {
 
 function renderMediaViewer(tab) {
   const mv = $('media-viewer');
-  const url = mediaUrl(tab.sid, tab.path);
+  const url = esc(mediaUrl(tab.sid, tab.path));
   let body = '';
   if (tab.mediaKind === 'image') {
     body = `<img src="${url}" class="${tab.fit ? 'fit' : 'raw'}" alt="${esc(tab.title)}" />`;
@@ -983,6 +1126,7 @@ function renderMediaViewer(tab) {
 }
 
 function openFileTab(sid, filePath, text) {
+  closeMobileSidebarIfNeeded();
   let idx = state.tabs.findIndex((t) => t.type === 'file' && t.sid === sid && t.path === filePath);
   if (idx === -1) {
     state.tabs.push({ type: 'file', title: filePath.split('/').pop() || filePath, sid, path: filePath, text, dirty: false });
@@ -993,6 +1137,7 @@ function openFileTab(sid, filePath, text) {
 }
 
 function openDockerTab(sid) {
+  closeMobileSidebarIfNeeded();
   let idx = state.tabs.findIndex((t) => t.type === 'docker' && t.sid === sid);
   if (idx === -1) {
     state.tabs.push({ type: 'docker', title: 'Docker', sid });
@@ -1040,6 +1185,7 @@ function makeDraggableTab(el, idx, list, onMove) {
 }
 
 function openVncTab(sid, host = '127.0.0.1', port = 5900, password = '') {
+  closeMobileSidebarIfNeeded();
   const sName = state.sessions.get(sid)?.name || host;
   let idx = state.vncTabs.findIndex((t) => t.sid === sid && t.host === host && t.port === port);
   if (idx === -1) {
@@ -1322,13 +1468,21 @@ function attachDockerDrawerTerm(sid, cid, cname, mountEl) {
     lineHeight: 1.2,
     drawBoldTextInBrightColors: true,
     scrollback: 2500,
-    theme: { background: '#121212', foreground: '#cccccc', cursor: '#ffffff', brightBlack: '#444444' },
+    theme: {
+      background: '#121212',
+      foreground: '#cccccc',
+      cursor: '#ffffff',
+      brightBlack: '#444444',
+      selectionBackground: 'rgba(55, 148, 255, 0.48)',
+      selectionInactiveBackground: 'rgba(55, 148, 255, 0.42)',
+    },
   });
   const fit = new FitAddon.FitAddon();
   xterm.loadAddon(fit);
   xterm.open(el);
   setTimeout(() => fit.fit(), 50);
   attachSmoothCursor(xterm, el);
+  attachTouchScroll(xterm, el);
 
   const inst = {
     reqId,
@@ -1345,7 +1499,7 @@ function attachDockerDrawerTerm(sid, cid, cname, mountEl) {
   state.dockerDrawerTerm = inst;
 
   xterm.onData((data) => {
-    if (inst.termId) wsSend({ type: 'term_input', termId: inst.termId, data });
+    if (inst.termId) sendTermInputWithMods(inst.termId, data);
   });
   xterm.onResize(({ rows, cols }) => {
     if (inst.termId) wsSend({ type: 'term_resize', termId: inst.termId, rows, cols });
@@ -1961,13 +2115,21 @@ function restoreWorkspace(restoredSessions, restoredTerms) {
         lineHeight: 1.2,
         drawBoldTextInBrightColors: true,
         scrollback: state.settings.scrollback || 5000,
-        theme: { background: '#181818', foreground: '#cccccc', cursor: '#ffffff', brightBlack: '#444444' },
+        theme: {
+      background: '#181818',
+      foreground: '#cccccc',
+      cursor: '#ffffff',
+      brightBlack: '#444444',
+      selectionBackground: 'rgba(55, 148, 255, 0.48)',
+      selectionInactiveBackground: 'rgba(55, 148, 255, 0.42)',
+    },
       });
       const fit = new FitAddon.FitAddon();
       xterm.loadAddon(fit);
       xterm.open(el);
       fit.fit();
       attachSmoothCursor(xterm, el);
+      attachTouchScroll(xterm, el, fit);
       if (rt.scrollback) {
         xterm.write(b64ToBytes(rt.scrollback));
       }
@@ -1982,15 +2144,474 @@ function restoreWorkspace(restoredSessions, restoredTerms) {
         pendingConnId: null,
       };
       state.terms.push(inst);
-      xterm.onData((data) => wsSend({ type: 'term_input', termId: rt.termId, data }));
+      xterm.onData((data) => sendTermInputWithMods(rt.termId, data));
       xterm.onResize(({ rows, cols }) => wsSend({ type: 'term_resize', termId: rt.termId, rows, cols }));
     }
     const savedTerm = Number(sessionStorage.getItem('trm_active_term'));
     const hasSaved = state.terms.some((t) => t.termId === savedTerm);
     state.activeTermId = hasSaved ? savedTerm : (state.terms[0]?.termId || null);
+    closeMobileSidebarIfNeeded();
     renderTermTabs();
     applyLayout();
   }
+}
+
+function syncViewportHeight() {
+  const appEl = $('app');
+  if (!appEl) return;
+  const vvH = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  const tbH = $('titlebar') && !$('titlebar').classList.contains('hidden') ? $('titlebar').offsetHeight : 35;
+  const sbH = $('status-bar') && !$('status-bar').classList.contains('hidden') ? $('status-bar').offsetHeight : 22;
+  appEl.style.height = `${Math.max(200, Math.floor(vvH - tbH - sbH))}px`;
+  if (window.visualViewport && window.visualViewport.offsetTop > 0) {
+    window.scrollTo(0, 0);
+  }
+  syncSidebarBackdrop();
+  window.dispatchEvent(new Event('resize'));
+}
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', syncViewportHeight);
+  window.visualViewport.addEventListener('scroll', () => {
+    if (window.visualViewport.offsetTop > 0) window.scrollTo(0, 0);
+  });
+}
+window.addEventListener('orientationchange', () => setTimeout(syncViewportHeight, 120));
+
+function getActiveTermInst() {
+  if (state.dockerDrawerTerm && state.dockerDrawerTerm.termId && !state.dockerDrawerTerm.el?.classList.contains('hidden')) {
+    const curTab = state.tabs[state.activeTab];
+    if (curTab?.type === 'docker') return state.dockerDrawerTerm;
+  }
+  const curTab = state.tabs[state.activeTab];
+  if (curTab?.type === 'term' && curTab.term?.termId) return curTab.term;
+  return state.terms.find((t) => t.termId && t.termId === state.activeTermId) || state.terms.find((t) => t.termId) || null;
+}
+
+function updateTouchModButtons() {
+  const bar = $('term-touch-bar');
+  if (!bar) return;
+  bar.querySelectorAll('[data-tmod]').forEach((b) => {
+    b.classList.toggle('active', !!state.touchMods[b.dataset.tmod]);
+  });
+}
+
+function applyTouchModsToData(data) {
+  if (!data || (!state.touchMods.ctrl && !state.touchMods.alt)) return data;
+  let out = data;
+  if (state.touchMods.ctrl && out.length === 1) {
+    const code = out.toUpperCase().charCodeAt(0);
+    if (code >= 64 && code <= 95) {
+      out = String.fromCharCode(code - 64);
+    } else if (out === ' ') {
+      out = '\x00';
+    }
+  }
+  if (state.touchMods.alt) {
+    out = '\x1b' + out;
+  }
+  state.touchMods.ctrl = false;
+  state.touchMods.alt = false;
+  updateTouchModButtons();
+  return out;
+}
+
+function sendTermInputWithMods(termId, data) {
+  if (!termId) return;
+  wsSend({ type: 'term_input', termId, data: applyTouchModsToData(data) });
+}
+
+(() => {
+  const bar = $('term-touch-bar');
+  if (!bar) return;
+  const keyMap = {
+    ESC: '\x1b',
+    TAB: '\t',
+    CTRL_C: '\x03',
+    UP: '\x1b[A',
+    DOWN: '\x1b[B',
+    RIGHT: '\x1b[C',
+    LEFT: '\x1b[D',
+    HOME: '\x1b[H',
+    END: '\x1b[F',
+    PGUP: '\x1b[5~',
+    PGDN: '\x1b[6~',
+  };
+  bar.querySelectorAll('.ttb-key').forEach((btn) => {
+    const handlePress = async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const mod = btn.dataset.tmod;
+      if (mod) {
+        state.touchMods[mod] = !state.touchMods[mod];
+        updateTouchModButtons();
+        return;
+      }
+      const inst = getActiveTermInst();
+      const act = btn.dataset.tact;
+      if (act === 'kbd') {
+        inst?.xterm?.focus();
+        return;
+      }
+      if (act === 'paste') {
+        if (!inst?.termId) return;
+        let text = '';
+        try {
+          text = await navigator.clipboard.readText();
+        } catch {
+          text = prompt(getLang() === 'tr' ? 'Terminale yapıştırılacak metin:' : 'Paste text to terminal:') || '';
+        }
+        if (text) wsSend({ type: 'term_input', termId: inst.termId, data: text });
+        return;
+      }
+      if (!inst?.termId) return;
+      const k = btn.dataset.tkey;
+      const seq = k ? keyMap[k] : btn.dataset.tseq;
+      if (seq) {
+        sendTermInputWithMods(inst.termId, seq);
+      }
+    };
+    btn.addEventListener('pointerdown', handlePress);
+  });
+})();
+
+function copyTextFallback(text) {
+  if (!text) return Promise.resolve(false);
+  if (navigator.clipboard?.writeText) {
+    return navigator.clipboard.writeText(text).then(() => true).catch(() => {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;';
+      document.body.appendChild(ta);
+      ta.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch {}
+      ta.remove();
+      return ok;
+    });
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch {}
+  ta.remove();
+  return Promise.resolve(ok);
+}
+
+(() => {
+  const selBar = $('term-sel-bar');
+  if (!selBar) return;
+  const copyBtn = $('term-sel-copy');
+  const allBtn = $('term-sel-all');
+  const clearBtn = $('term-sel-clear');
+  if (copyBtn) copyBtn.textContent = getLang() === 'tr' ? 'Kopyala' : 'Copy';
+  if (allBtn) allBtn.textContent = getLang() === 'tr' ? 'Tümü' : 'All';
+  if (clearBtn) clearBtn.textContent = getLang() === 'tr' ? 'Temizle' : 'Clear';
+
+  copyBtn?.addEventListener('pointerdown', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const inst = getActiveTermInst();
+    const txt = inst?.xterm?.getSelection() || '';
+    if (!txt) return;
+    const ok = await copyTextFallback(txt);
+    toast(ok ? (getLang() === 'tr' ? 'Panoya kopyalandı' : 'Copied to clipboard') : (getLang() === 'tr' ? 'Kopyalanamadı' : 'Copy failed'), ok ? 'ok' : 'err');
+    inst?.xterm?.clearSelection();
+    selBar.classList.add('hidden');
+  });
+  allBtn?.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const inst = getActiveTermInst();
+    inst?.xterm?.selectAll();
+  });
+  clearBtn?.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const inst = getActiveTermInst();
+    inst?.xterm?.clearSelection();
+    selBar.classList.add('hidden');
+  });
+})();
+
+function attachTouchScroll(xterm, el, fit = null) {
+  let lastY = null;
+  let startX = 0;
+  let startY = 0;
+  let curX = 0;
+  let curY = 0;
+  let acc = 0;
+  let vel = 0;
+  let lastTs = 0;
+  let inertiaId = 0;
+  let pinchDist0 = 0;
+  let pinchFont0 = 14;
+  let longPressTimer = 0;
+  let selecting = false;
+  let hasMovedForScroll = false;
+  let anchorCell = null;
+  let suppressMouseUntil = 0;
+
+  const stopInertia = () => {
+    if (inertiaId) {
+      cancelAnimationFrame(inertiaId);
+      inertiaId = 0;
+    }
+  };
+
+  const clearLongPress = () => {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = 0;
+    }
+  };
+
+  const getLineH = () => {
+    const screen = el.querySelector('.xterm-screen');
+    if (screen && xterm.rows) {
+      return Math.max(12, screen.clientHeight / xterm.rows);
+    }
+    return 18;
+  };
+
+  const coordsToCell = (clientX, clientY) => {
+    const screen = el.querySelector('.xterm-screen') || el;
+    const rect = screen.getBoundingClientRect();
+    const cols = xterm.cols || 80;
+    const rows = xterm.rows || 24;
+    const cellW = Math.max(1, rect.width / cols);
+    const cellH = Math.max(1, rect.height / rows);
+    const col = Math.max(0, Math.min(cols - 1, Math.floor((clientX - rect.left) / cellW)));
+    const vRow = Math.max(0, Math.min(rows - 1, Math.floor((clientY - rect.top) / cellH)));
+    const row = (xterm.buffer?.active?.viewportY || 0) + vRow;
+    return { col, row };
+  };
+
+  const selectWordAt = (cell) => {
+    const line = xterm.buffer?.active?.getLine(cell.row)?.translateToString(true) || '';
+    if (!line) {
+      xterm.select(0, cell.row, Math.max(1, xterm.cols || 80));
+      return;
+    }
+    const clampCol = Math.min(cell.col, Math.max(0, line.length - 1));
+    const isWordChar = (ch) => ch && /[^\s"'`<>()[\]{};,]/.test(ch);
+    let s = clampCol;
+    let e = clampCol;
+    if (isWordChar(line[clampCol])) {
+      while (s > 0 && isWordChar(line[s - 1])) s--;
+      while (e + 1 < line.length && isWordChar(line[e + 1])) e++;
+      xterm.select(s, cell.row, Math.max(1, e - s + 1));
+    } else {
+      const trimmedLen = line.trimEnd().length;
+      if (trimmedLen > 0) {
+        xterm.select(0, cell.row, trimmedLen);
+      } else {
+        xterm.select(cell.col, cell.row, 1);
+      }
+    }
+  };
+
+  const updateRangeSelection = (a, b) => {
+    let start = a;
+    let end = b;
+    if (b.row < a.row || (b.row === a.row && b.col < a.col)) {
+      start = b;
+      end = a;
+    }
+    const cols = xterm.cols || 80;
+    const len = (end.row - start.row) * cols + (end.col - start.col) + 1;
+    xterm.select(start.col, start.row, Math.max(1, len));
+  };
+
+  const syncSelBar = () => {
+    const selBar = $('term-sel-bar');
+    if (!selBar) return;
+    if (xterm.hasSelection()) {
+      const copyBtn = $('term-sel-copy');
+      const allBtn = $('term-sel-all');
+      const clearBtn = $('term-sel-clear');
+      if (copyBtn) copyBtn.textContent = getLang() === 'tr' ? 'Kopyala' : 'Copy';
+      if (allBtn) allBtn.textContent = getLang() === 'tr' ? 'Tümü' : 'All';
+      if (clearBtn) clearBtn.textContent = getLang() === 'tr' ? 'Temizle' : 'Clear';
+      selBar.classList.remove('hidden');
+    } else {
+      selBar.classList.add('hidden');
+    }
+  };
+  xterm.onSelectionChange(syncSelBar);
+
+  const blockSyntheticMouse = (e) => {
+    if (selecting || performance.now() < suppressMouseUntil) {
+      e.stopImmediatePropagation();
+      e.stopPropagation();
+      if (e.cancelable) e.preventDefault();
+    }
+  };
+  el.addEventListener('mousedown', blockSyntheticMouse, true);
+  el.addEventListener('mouseup', blockSyntheticMouse, true);
+  el.addEventListener('click', blockSyntheticMouse, true);
+
+  const scrollByLines = (lines) => {
+    if (!lines) return;
+    if (xterm.buffer?.active?.type === 'alternate') {
+      const inst = state.terms.find((t) => t.xterm === xterm);
+      if (inst?.termId) {
+        const seq = lines > 0 ? '\x1b[B' : '\x1b[A';
+        const count = Math.min(8, Math.abs(lines));
+        wsSend({ type: 'term_input', termId: inst.termId, data: seq.repeat(count) });
+      }
+    } else {
+      xterm.scrollLines(lines);
+    }
+  };
+
+  el.addEventListener('contextmenu', (e) => {
+    if (window.matchMedia?.('(pointer: coarse)').matches || isMobileOrTablet() || selecting || performance.now() < suppressMouseUntil) {
+      e.preventDefault();
+    }
+  });
+
+  el.addEventListener('touchstart', (e) => {
+    stopInertia();
+    clearLongPress();
+    if (e.touches.length === 1) {
+      const t0 = e.touches[0];
+      startX = t0.clientX;
+      startY = t0.clientY;
+      curX = t0.clientX;
+      curY = t0.clientY;
+      lastY = t0.clientY;
+      acc = 0;
+      vel = 0;
+      lastTs = performance.now();
+      selecting = false;
+      hasMovedForScroll = false;
+      longPressTimer = setTimeout(() => {
+        if (hasMovedForScroll) return;
+        selecting = true;
+        suppressMouseUntil = performance.now() + 2000;
+        anchorCell = coordsToCell(startX, startY);
+        const nowCell = coordsToCell(curX, curY);
+        if (nowCell.row !== anchorCell.row || Math.abs(nowCell.col - anchorCell.col) > 1) {
+          updateRangeSelection(anchorCell, nowCell);
+        } else {
+          selectWordAt(anchorCell);
+        }
+        syncSelBar();
+        try { navigator.vibrate?.(25); } catch {}
+      }, 340);
+    } else if (e.touches.length === 2) {
+      lastY = null;
+      selecting = false;
+      hasMovedForScroll = true;
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      pinchDist0 = Math.hypot(dx, dy);
+      pinchFont0 = xterm.options.fontSize || 14;
+    } else {
+      lastY = null;
+      selecting = false;
+    }
+  }, { passive: true });
+
+  el.addEventListener('touchmove', (e) => {
+    if (e.touches.length === 2 && pinchDist0 > 20) {
+      clearLongPress();
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.hypot(dx, dy);
+      const nextFs = Math.max(9, Math.min(24, Math.round(pinchFont0 * (dist / pinchDist0))));
+      if (xterm.options.fontSize !== nextFs) {
+        xterm.options.fontSize = nextFs;
+        const inst = state.terms.find((t) => t.xterm === xterm);
+        (fit || inst?.fit)?.fit();
+      }
+      if (e.cancelable) e.preventDefault();
+      return;
+    }
+    if (e.touches.length !== 1) return;
+    const t0 = e.touches[0];
+    curX = t0.clientX;
+    curY = t0.clientY;
+    if (selecting && anchorCell) {
+      suppressMouseUntil = performance.now() + 2000;
+      const screen = el.querySelector('.xterm-screen') || el;
+      const rect = screen.getBoundingClientRect();
+      if (t0.clientY < rect.top + 18) xterm.scrollLines(-1);
+      else if (t0.clientY > rect.bottom - 18) xterm.scrollLines(1);
+      const curCell = coordsToCell(t0.clientX, t0.clientY);
+      updateRangeSelection(anchorCell, curCell);
+      syncSelBar();
+      if (e.cancelable) e.preventDefault();
+      return;
+    }
+    const moveDist = Math.hypot(t0.clientX - startX, t0.clientY - startY);
+    if (moveDist > 16) {
+      hasMovedForScroll = true;
+      clearLongPress();
+    }
+    if (!hasMovedForScroll) {
+      if (e.cancelable) e.preventDefault();
+      return;
+    }
+    if (lastY === null) return;
+    const now = performance.now();
+    const y = t0.clientY;
+    const dy = lastY - y;
+    const dt = Math.max(8, now - lastTs);
+    vel = 0.7 * (dy / dt) + 0.3 * vel;
+    lastY = y;
+    lastTs = now;
+    acc += dy;
+    const lineH = getLineH();
+    const lines = Math.trunc(acc / lineH);
+    if (lines !== 0) {
+      scrollByLines(lines);
+      acc -= lines * lineH;
+    }
+    if (e.cancelable) e.preventDefault();
+  }, { passive: false });
+
+  const onTouchEnd = (e) => {
+    clearLongPress();
+    if (selecting) {
+      suppressMouseUntil = performance.now() + 800;
+      selecting = false;
+      anchorCell = null;
+      lastY = null;
+      acc = 0;
+      syncSelBar();
+      if (e && e.cancelable) e.preventDefault();
+      return;
+    }
+    if (hasMovedForScroll && lastY !== null && Math.abs(vel) > 0.25 && xterm.buffer?.active?.type !== 'alternate') {
+      let curVel = vel * 16;
+      const lineH = getLineH();
+      let rem = 0;
+      const step = () => {
+        curVel *= 0.91;
+        if (Math.abs(curVel) < 0.6) {
+          inertiaId = 0;
+          return;
+        }
+        rem += curVel;
+        const lines = Math.trunc(rem / lineH);
+        if (lines !== 0) {
+          xterm.scrollLines(lines);
+          rem -= lines * lineH;
+        }
+        inertiaId = requestAnimationFrame(step);
+      };
+      inertiaId = requestAnimationFrame(step);
+    }
+    lastY = null;
+    acc = 0;
+    pinchDist0 = 0;
+  };
+  el.addEventListener('touchend', onTouchEnd, { passive: false });
+  el.addEventListener('touchcancel', () => { clearLongPress(); stopInertia(); selecting = false; anchorCell = null; lastY = null; acc = 0; pinchDist0 = 0; }, { passive: true });
 }
 
 function attachSmoothCursor(xterm, el) {
@@ -2049,13 +2670,21 @@ function openTerminal(sid, pendingConnId = null, dockerOpts = null) {
     lineHeight: 1.2,
     drawBoldTextInBrightColors: true,
     scrollback: state.settings.scrollback || 5000,
-    theme: { background: '#181818', foreground: '#cccccc', cursor: '#ffffff', brightBlack: '#444444' },
+    theme: {
+      background: '#181818',
+      foreground: '#cccccc',
+      cursor: '#ffffff',
+      brightBlack: '#444444',
+      selectionBackground: 'rgba(55, 148, 255, 0.48)',
+      selectionInactiveBackground: 'rgba(55, 148, 255, 0.42)',
+    },
   });
   const fit = new FitAddon.FitAddon();
   xterm.loadAddon(fit);
   xterm.open(el);
   fit.fit();
   attachSmoothCursor(xterm, el);
+  attachTouchScroll(xterm, el);
 
   const baseName = dockerOpts ? dockerOpts.name : (state.sessions.get(sid)?.name || t('conn_connecting'));
   const inst = { reqId, termId: null, sid, title: uniqueTermTitle(baseName, reqId), xterm, fit, el, pendingConnId, pane: 'term' };
@@ -2064,7 +2693,7 @@ function openTerminal(sid, pendingConnId = null, dockerOpts = null) {
   renderTermTabs();
   applyLayout();
 
-  xterm.onData((data) => { if (inst.termId) wsSend({ type: 'term_input', termId: inst.termId, data }); });
+  xterm.onData((data) => { if (inst.termId) sendTermInputWithMods(inst.termId, data); });
   xterm.onResize(({ rows, cols }) => { if (inst.termId) wsSend({ type: 'term_resize', termId: inst.termId, rows, cols }); });
   wsSend({
     type: 'term_open',
@@ -2208,8 +2837,16 @@ function applyLayout() {
   let rows = '1fr';
 
   const vis = L.order.filter((p) => (p === 'editor' && hasEditor) || (p === 'vnc' && hasVnc) || (p === 'term' && hasTerm));
+  const isNarrowMobile = window.innerWidth <= 640;
   if (!vis.length) {
     areas = '"editor"';
+  } else if (isNarrowMobile) {
+    areas = vis.map((p) => `"${p}"`).join(' ');
+    cols = '1fr';
+    colArr = [100];
+    if (vis.length === 1) rows = '1fr';
+    else if (vis.length === 2) rows = `${topR}% ${r}%`;
+    else rows = `${Math.round(topR / 2)}% ${Math.round(topR / 2)}% ${r}%`;
   } else if (L.mode === 'classic') {
     if (hasEditor && hasVnc && hasTerm) { areas = '"editor vnc" "term term"'; cols = col2Str; colArr = [c2, 100 - c2]; rows = `${topR}% ${r}%`; }
     else if (hasEditor && hasVnc) { areas = '"editor vnc"'; cols = col2Str; colArr = [c2, 100 - c2]; }
@@ -2438,33 +3075,45 @@ applyLayout();
   const resizer = $('term-resizer');
   const panel = $('term-panel');
   let dragging = false;
-  resizer.addEventListener('mousedown', (e) => {
-    e.preventDefault();
+  const startDrag = (e) => {
+    if (e.cancelable) e.preventDefault();
     dragging = true;
     panel.classList.remove('max');
     resizer.classList.add('dragging');
     document.body.style.cursor = 'ns-resize';
-  });
-  window.addEventListener('mousemove', (e) => {
+  };
+  const moveDrag = (clientY) => {
     if (!dragging) return;
     const rect = $('main-area').getBoundingClientRect();
-    const pct = Math.round(((rect.bottom - e.clientY) / Math.max(200, rect.height)) * 100);
-    state.layout.termRatio = Math.max(15, Math.min(75, pct));
+    const pct = Math.round(((rect.bottom - clientY) / Math.max(200, rect.height)) * 100);
+    state.layout.termRatio = Math.max(15, Math.min(82, pct));
     applyLayout();
-  });
-  window.addEventListener('mouseup', () => {
+  };
+  const endDrag = () => {
     if (!dragging) return;
     dragging = false;
     resizer.classList.remove('dragging');
     document.body.style.cursor = '';
     saveLayout();
     applyLayout();
-  });
+  };
+  resizer.addEventListener('mousedown', startDrag);
+  window.addEventListener('mousemove', (e) => moveDrag(e.clientY));
+  window.addEventListener('mouseup', endDrag);
+  resizer.addEventListener('touchstart', startDrag, { passive: false });
+  window.addEventListener('touchmove', (e) => {
+    if (!dragging || !e.touches.length) return;
+    if (e.cancelable) e.preventDefault();
+    moveDrag(e.touches[0].clientY);
+  }, { passive: false });
+  window.addEventListener('touchend', endDrag);
+  window.addEventListener('touchcancel', endDrag);
 })();
 
 $('quick-connect-btn').onclick = () => quickConnect($('quick-connect-input').value);
 $('quick-connect-input').onkeydown = (e) => { if (e.key === 'Enter') quickConnect($('quick-connect-input').value); };
 function startConnect(sid, profile) {
+  closeMobileSidebarIfNeeded();
   if (profile?.shared && profile.permissions && !profile.permissions.terminal) {
     toast(t('connecting_toast', { name: profile.name || t('shared_badge') }), 'info');
     wsSend({ type: 'connect', sid, profile });
@@ -2715,7 +3364,7 @@ function openHostModal(h = null) {
     user: h?.user || '',
     auth: h?.auth || 'password',
     key_path: h?.key_path || '',
-    color: h?.color || HOST_COLORS[0],
+    color: /^#[0-9a-fA-F]{6}$/.test(String(h?.color || '')) ? String(h.color) : HOST_COLORS[0],
     group: h?.group || '',
     tags: Array.isArray(h?.tags) ? h.tags.join(', ') : (h?.tags || ''),
     jump_id: h?.jump_id || '',
@@ -2740,10 +3389,10 @@ function openHostModal(h = null) {
 
   const jumpOpts = state.hosts
     .filter((x) => x.id !== draft.id)
-    .map((x) => `<option value="${x.id}" ${draft.jump_id === x.id ? 'selected' : ''}>${esc(x.name || x.host)}</option>`)
+    .map((x) => `<option value="${esc(x.id)}" ${draft.jump_id === x.id ? 'selected' : ''}>${esc(x.name || x.host)}</option>`)
     .join('');
   const snipOpts = state.snippets
-    .map((x) => `<option value="${x.id}" ${draft.startup_snippet === x.id ? 'selected' : ''}>${esc(x.name)}</option>`)
+    .map((x) => `<option value="${esc(x.id)}" ${draft.startup_snippet === x.id ? 'selected' : ''}>${esc(x.name)}</option>`)
     .join('');
   const catOpts = Array.from(new Set(state.hosts.map((x) => (x.group || '').trim()).filter(Boolean)))
     .sort()

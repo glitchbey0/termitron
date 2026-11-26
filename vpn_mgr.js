@@ -156,6 +156,19 @@ function parseWgConf(raw) {
     const mtu = Number(iface.mtu);
     if (!Number.isInteger(mtu) || mtu < 576 || mtu > 9000) throw new Error('Invalid MTU value.');
   }
+  if (!/^[0-9a-fA-F.:/,\s]{3,256}$/.test(iface.address)) {
+    throw new Error('Invalid WireGuard Address format.');
+  }
+  if (iface.dns && !/^[0-9a-fA-F.:,\s]{3,256}$/.test(iface.dns)) {
+    throw new Error('Invalid WireGuard DNS format.');
+  }
+  if (peer.allowedips && !/^[0-9a-fA-F.:/,\s]{3,512}$/.test(peer.allowedips)) {
+    throw new Error('Invalid WireGuard AllowedIPs format.');
+  }
+  if (peer.persistentkeepalive) {
+    const ka = Number(peer.persistentkeepalive);
+    if (!Number.isInteger(ka) || ka < 0 || ka > 65535) throw new Error('Invalid PersistentKeepalive value.');
+  }
   return { iface, peer };
 }
 
@@ -219,7 +232,7 @@ function stopWireproxy(key) {
 async function ensureWireproxy(key, dataDir, wgConf) {
   const parsed = parseWgConf(wgConf);
   const existing = activeTunnels.get(key);
-  if (existing && existing.wgConf === wgConf && existing.proc && !existing.proc.killed) {
+  if (existing && existing.wgConf === wgConf && existing.proc && !existing.proc.killed && existing.proc.exitCode === null && existing.proc.signalCode === null) {
     return { host: '127.0.0.1', port: existing.port, endpoint: parsed.peer.endpoint };
   }
   if (pendingStarts.has(key)) {
@@ -503,7 +516,10 @@ function saveDefaultConf(filename, content) {
 
 function deleteDefaultConf(filename) {
   const safe = path.basename(String(filename || ''));
-  const target = path.join(DEFAULT_VPN_DIR, safe);
+  if (!safe || !safe.toLowerCase().endsWith('.conf')) return false;
+  const baseDir = path.resolve(DEFAULT_VPN_DIR);
+  const target = path.resolve(baseDir, safe);
+  if (!target.startsWith(baseDir + path.sep)) return false;
   if (fs.existsSync(target)) {
     fs.unlinkSync(target);
     stopWireproxy('__default__');

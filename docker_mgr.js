@@ -86,8 +86,8 @@ function jlines(s) {
 
 async function getDockerData(conn) {
   const cmd = `
-TDIR=$(mktemp -d 2>/dev/null || echo "/tmp/.trm_dk_$$")
-mkdir -p "$TDIR"
+umask 077
+TDIR=$(mktemp -d) || exit 1
 docker ps -a --no-trunc --format '{{json .}}' >"$TDIR/ps" 2>"$TDIR/err" &
 P1=$!
 docker stats --no-stream --format '{{json .}}' >"$TDIR/st" 2>/dev/null &
